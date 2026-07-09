@@ -1,7 +1,22 @@
 :root {
-  color: #17231d;
-  background: #f7f2ea;
+  --red: #df665b;
+  --red-light: #fbe9e6;
+  --red-lighter: #fff7f5;
+  --red-tint: #fbefec;
+  --red-text: #a84a41;
+  --amber: #d69a35;
+  --amber-light: #fff2d8;
+  --amber-text: #8d5e10;
+  --text: #2b2422;
+  --muted: #817572;
+  --surface-soft: #fbf8f7;
+  --gray-bg: #f5f2f1;
+  --border: #eee4e2;
+  --border-strong: #e2d7d4;
+  color: var(--text);
+  background: #fff;
   font-family:
+    "Noto Sans KR",
     Pretendard,
     -apple-system,
     BlinkMacSystemFont,
@@ -17,12 +32,18 @@
   box-sizing: border-box;
 }
 
+html {
+  background: #fff;
+}
+
 body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
 }
 
-button {
+button,
+input,
+select {
   -webkit-tap-highlight-color: transparent;
 }
