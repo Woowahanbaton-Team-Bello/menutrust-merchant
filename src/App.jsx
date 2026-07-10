@@ -15,7 +15,7 @@ import {
 import './App.css'
 import { ALLERGENS } from './domain/allergy.js'
 import { STEP_LABELS } from './domain/merchantDemo.js'
-import { apiFetch } from './lib/api.js'
+import { apiFetch, registerStore } from './lib/api.js'
 import { env } from './lib/env.js'
 import {
   extractEditableItems,
@@ -40,6 +40,7 @@ const MENU_BOARD_DETAIL_PATHS = [
   (menuBoardId) => `/menu-board/${menuBoardId}`,
   (menuBoardId) => `/menu-boards/me/${menuBoardId}`,
 ]
+const PENDING_STORE_REGISTRATION_KEY = 'menutrust.pending-store-registration'
 
 const allergenOptions = ALLERGENS.map((allergen) => allergen.label)
 
@@ -85,6 +86,41 @@ function getAuthErrorMessage(error) {
   return '인증 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.'
 }
 
+function readPendingStoreRegistration() {
+  if (typeof window === 'undefined') return null
+
+  const raw = window.localStorage.getItem(PENDING_STORE_REGISTRATION_KEY)
+
+  if (!raw) return null
+
+  try {
+    const parsed = JSON.parse(raw)
+
+    if (!parsed || typeof parsed !== 'object') {
+      return null
+    }
+
+    return {
+      email: typeof parsed.email === 'string' ? parsed.email : '',
+      storeName: typeof parsed.storeName === 'string' ? parsed.storeName : '',
+    }
+  } catch {
+    return null
+  }
+}
+
+function writePendingStoreRegistration(value) {
+  if (typeof window === 'undefined') return
+
+  window.localStorage.setItem(PENDING_STORE_REGISTRATION_KEY, JSON.stringify(value))
+}
+
+function clearPendingStoreRegistration() {
+  if (typeof window === 'undefined') return
+
+  window.localStorage.removeItem(PENDING_STORE_REGISTRATION_KEY)
+}
+
 function App() {
   const [phase, setPhase] = useState('login')
   const [step, setStep] = useState(1)
@@ -104,6 +140,9 @@ function App() {
   const [selectedMenuBoardId, setSelectedMenuBoardId] = useState('')
   const [isMenuBoardDetailLoading, setIsMenuBoardDetailLoading] = useState(false)
   const [menuBoardDetailError, setMenuBoardDetailError] = useState('')
+  const [pendingStoreRegistration, setPendingStoreRegistration] = useState(() => readPendingStoreRegistration())
+  const [isStoreRegistrationLoading, setIsStoreRegistrationLoading] = useState(false)
+  const [storeRegistrationError, setStoreRegistrationError] = useState('')
 
   const itemCount = items.length
   const currentStep = useMemo(
@@ -174,6 +213,50 @@ function App() {
   useEffect(() => {
     let isMounted = true
 
+    async function completePendingStoreRegistration() {
+      if (!user || !pendingStoreRegistration?.storeName) {
+        setIsStoreRegistrationLoading(false)
+        setStoreRegistrationError('')
+        return
+      }
+
+      if (pendingStoreRegistration.email && user.email && pendingStoreRegistration.email !== user.email) {
+        return
+      }
+
+      setIsStoreRegistrationLoading(true)
+      setStoreRegistrationError('')
+
+      try {
+        await registerStore({ storeName: pendingStoreRegistration.storeName })
+
+        if (!isMounted) return
+
+        clearPendingStoreRegistration()
+        setPendingStoreRegistration(null)
+      } catch (error) {
+        if (!isMounted) return
+
+        setStoreRegistrationError(
+          error instanceof Error ? error.message : '가게 등록에 실패했습니다.',
+        )
+      } finally {
+        if (isMounted) {
+          setIsStoreRegistrationLoading(false)
+        }
+      }
+    }
+
+    completePendingStoreRegistration()
+
+    return () => {
+      isMounted = false
+    }
+  }, [pendingStoreRegistration, user])
+
+  useEffect(() => {
+    let isMounted = true
+
     async function loadMenuBoards() {
       if (!user) {
         setMenuBoards([])
@@ -182,6 +265,11 @@ function App() {
         setSelectedMenuBoardId('')
         setMenuBoardDetailError('')
         setItems([])
+        return
+      }
+
+      if (pendingStoreRegistration?.storeName || isStoreRegistrationLoading) {
+        setIsMenuBoardsLoading(false)
         return
       }
 
@@ -230,7 +318,7 @@ function App() {
     return () => {
       isMounted = false
     }
-  }, [user])
+  }, [isStoreRegistrationLoading, pendingStoreRegistration, user])
 
   useEffect(() => {
     let isMounted = true
@@ -359,6 +447,14 @@ function App() {
           throw error
         }
 
+        const nextPendingStoreRegistration = {
+          email,
+          storeName: storeNameInput,
+        }
+
+        writePendingStoreRegistration(nextPendingStoreRegistration)
+        setPendingStoreRegistration(nextPendingStoreRegistration)
+
         setAuth((current) => ({
           ...current,
           email,
@@ -374,7 +470,7 @@ function App() {
         }
 
         setPhase('login')
-        setAuthNotice('가입이 완료되었습니다. 이메일 인증을 마친 뒤 로그인해주세요.')
+        setAuthNotice('가입이 완료되었습니다. 다음 로그인 시 가게 등록을 이어서 진행합니다.')
         return
       }
 
@@ -484,11 +580,13 @@ function App() {
         isMenuBoardDetailLoading={isMenuBoardDetailLoading}
         isLogoutPending={isLogoutPending}
         isMenuBoardsLoading={isMenuBoardsLoading}
+        isStoreRegistrationLoading={isStoreRegistrationLoading}
         menuBoardCount={menuBoards.length}
         menuBoardDetailError={menuBoardDetailError}
         menuBoardsError={menuBoardsError}
         phase={phase}
         step={step}
+        storeRegistrationError={storeRegistrationError}
         storeName={storeName}
         userEmail={user?.email || ''}
         onLogout={logout}
@@ -727,11 +825,13 @@ function Sidebar({
   isMenuBoardDetailLoading,
   isLogoutPending,
   isMenuBoardsLoading,
+  isStoreRegistrationLoading,
   menuBoardCount,
   menuBoardDetailError,
   menuBoardsError,
   phase,
   step,
+  storeRegistrationError,
   storeName,
   userEmail,
   onLogout,
@@ -767,7 +867,9 @@ function Sidebar({
         <p>
           {userEmail
             ? `${userEmail} 계정으로 로그인됨 · ${
-                isMenuBoardsLoading
+                isStoreRegistrationLoading
+                  ? '가게 등록 중'
+                  : isMenuBoardsLoading
                   ? '메뉴판 목록 확인 중'
                   : isMenuBoardDetailLoading
                     ? '메뉴판 상세 확인 중'
@@ -775,6 +877,7 @@ function Sidebar({
               }`
             : `${storeName} 메뉴 ${itemCount}개 기준 데모입니다.`}
         </p>
+        {storeRegistrationError ? <p className="sidebar-feedback">{storeRegistrationError}</p> : null}
         {menuBoardsError ? <p className="sidebar-feedback">{menuBoardsError}</p> : null}
         {menuBoardDetailError ? <p className="sidebar-feedback">{menuBoardDetailError}</p> : null}
         {appError ? <p className="sidebar-feedback">{appError}</p> : null}
