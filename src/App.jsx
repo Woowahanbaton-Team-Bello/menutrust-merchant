@@ -27,6 +27,7 @@ import {
   runAllergenAnalysis,
   runMockFullAnalysis,
   saveAllergens,
+  savePublishedQrImage,
   saveMenuItems,
 } from './lib/api.js'
 import { env } from './lib/env.js'
@@ -40,6 +41,7 @@ import { supabase } from './lib/supabase.js'
 
 const APP_NAME = '두입세입'
 const DEMO_STORE_NAME = '우아타이'
+const STATIC_PUBLIC_MENU_URL = (env.appBaseUrl || 'https://menutrust-customer.vercel.app/').trim()
 const EMPTY_AUTH_FORM = {
   email: '',
   password: '',
@@ -80,21 +82,61 @@ function getUserStoreName(user) {
     : DEMO_STORE_NAME
 }
 
-function resolvePublicMenuUrl(publicMenu) {
-  const explicitUrl = typeof publicMenu?.publicUrl === 'string' ? publicMenu.publicUrl.trim() : ''
+function resolveQrImageUrl(publicMenu) {
+  const directFields = [
+    publicMenu?.qrImageUrl,
+    publicMenu?.qrImageDataUrl,
+    publicMenu?.qrCodeImageUrl,
+    publicMenu?.qrCodeImageDataUrl,
+    publicMenu?.qrImage,
+  ]
 
-  if (explicitUrl) {
-    return explicitUrl
+  const directUrl = directFields.find((value) => typeof value === 'string' && value.trim())
+
+  if (directUrl) {
+    return directUrl.trim()
   }
 
-  const slug = typeof publicMenu?.slug === 'string' ? publicMenu.slug.trim() : ''
-  const baseUrl = typeof env.appBaseUrl === 'string' ? env.appBaseUrl.trim().replace(/\/$/, '') : ''
+  const base64Fields = [
+    publicMenu?.qrImageBase64,
+    publicMenu?.qrCodeImageBase64,
+  ]
 
-  if (baseUrl && slug) {
-    return `${baseUrl}/m/${slug}`
+  const base64Value = base64Fields.find((value) => typeof value === 'string' && value.trim())
+
+  if (!base64Value) {
+    return ''
   }
 
-  return ''
+  const normalized = base64Value.trim()
+
+  if (normalized.startsWith('data:image/')) {
+    return normalized
+  }
+
+  return `data:image/png;base64,${normalized}`
+}
+
+function normalizePublishedMenu(publicMenu) {
+  if (!publicMenu || typeof publicMenu !== 'object') {
+    return null
+  }
+
+  return {
+    id: publicMenu.id || '',
+    menuBoardId: publicMenu.menuBoardId || publicMenu.menu_board_id || '',
+    publicUrl: publicMenu.publicUrl || publicMenu.public_url || '',
+    qrCodeImageDataUrl: publicMenu.qrCodeImageDataUrl || publicMenu.qr_code_image_data_url || '',
+    qrCodeImageUrl: publicMenu.qrCodeImageUrl || publicMenu.qr_code_image_url || '',
+    qrCodeImageBase64: publicMenu.qrCodeImageBase64 || publicMenu.qr_code_image_base64 || '',
+    qrImage: publicMenu.qrImage || publicMenu.qr_image || '',
+    qrImageBase64: publicMenu.qrImageBase64 || publicMenu.qr_image_base64 || '',
+    qrImageDataUrl: publicMenu.qrImageDataUrl || publicMenu.qr_image_data_url || '',
+    qrImageUrl: publicMenu.qrImageUrl || publicMenu.qr_image_url || '',
+    qrPayload: publicMenu.qrPayload || publicMenu.qr_payload || '',
+    slug: publicMenu.slug || '',
+    status: publicMenu.status || '',
+  }
 }
 
 function getAuthErrorMessage(error) {
@@ -241,7 +283,8 @@ function App() {
     [menuBoardSummaries, selectedStoreId],
   )
   const storeName = useMemo(() => getUserStoreName(user), [user])
-  const menuUrl = useMemo(() => resolvePublicMenuUrl(publishedMenu), [publishedMenu])
+  const persistedQrImageUrl = useMemo(() => resolveQrImageUrl(publishedMenu), [publishedMenu])
+  const menuUrl = STATIC_PUBLIC_MENU_URL
 
   function updateItem(index, updater) {
     setItems((current) => current.map((item, i) => (i === index ? updater(item) : item)))
@@ -259,6 +302,11 @@ function App() {
     let isMounted = true
 
     async function syncPublishedQrImage() {
+      if (persistedQrImageUrl) {
+        setQrImageUrl((current) => (current === persistedQrImageUrl ? current : persistedQrImageUrl))
+        return
+      }
+
       if (!menuUrl) {
         setQrImageUrl('')
         return
@@ -282,7 +330,7 @@ function App() {
     return () => {
       isMounted = false
     }
-  }, [menuUrl])
+  }, [menuUrl, persistedQrImageUrl])
 
   useEffect(() => {
     if (!selectedStoreId || !selectedMenuBoardId) {
@@ -484,7 +532,7 @@ function App() {
       try {
         const { data: publishedMenuRow, error: publishedMenuError } = await supabase
           .from('public_menus')
-          .select('menu_board_id, public_url, slug, status')
+          .select('*')
           .eq('store_id', selectedStoreId)
           .eq('status', 'published')
           .maybeSingle()
@@ -497,16 +545,7 @@ function App() {
 
         if (!isMounted) return
 
-        setPublishedMenu(
-          publishedMenuRow
-            ? {
-                menuBoardId: publishedMenuRow.menu_board_id,
-                publicUrl: publishedMenuRow.public_url,
-                slug: publishedMenuRow.slug,
-                status: publishedMenuRow.status,
-              }
-            : null,
-        )
+        setPublishedMenu(normalizePublishedMenu(publishedMenuRow))
 
         const candidateBoardIds = [
           selectedMenuBoardId,
@@ -912,16 +951,35 @@ function App() {
         publicBaseUrl: env.appBaseUrl || undefined,
       })
 
-      const nextMenuUrl = result.publicMenu?.publicUrl || ''
+      const nextPublishedMenu = normalizePublishedMenu(result.publicMenu)
+      const nextMenuUrl = STATIC_PUBLIC_MENU_URL
 
-      if (!nextMenuUrl) {
-        throw new Error('발행된 메뉴판 링크를 받지 못했습니다.')
+      const generatedQrImageUrl = await createQrImage(nextMenuUrl)
+      const existingQrImageUrl = resolveQrImageUrl(nextPublishedMenu)
+      let finalPublishedMenu = nextPublishedMenu
+      let finalQrImageUrl = existingQrImageUrl || generatedQrImageUrl
+
+      if (!existingQrImageUrl) {
+        try {
+          const savedQrResult = await savePublishedQrImage({
+            menuBoardId: selectedMenuBoardId,
+            menuUrl: nextMenuUrl,
+            qrImageDataUrl: generatedQrImageUrl,
+          })
+
+          finalPublishedMenu = normalizePublishedMenu(savedQrResult?.publicMenu || savedQrResult) || nextPublishedMenu
+          finalQrImageUrl = resolveQrImageUrl(finalPublishedMenu) || generatedQrImageUrl
+        } catch (error) {
+          setAppError(
+            error instanceof Error
+              ? `QR 이미지는 생성했지만 저장에는 실패했습니다. ${error.message}`
+              : 'QR 이미지는 생성했지만 저장에는 실패했습니다.',
+          )
+        }
       }
 
-      const nextQrImageUrl = await createQrImage(nextMenuUrl)
-
-      setPublishedMenu(result.publicMenu)
-      setQrImageUrl(nextQrImageUrl)
+      setPublishedMenu(finalPublishedMenu)
+      setQrImageUrl(finalQrImageUrl)
       setMenuBoardRefreshKey((current) => current + 1)
       setStep(7)
     } catch (error) {

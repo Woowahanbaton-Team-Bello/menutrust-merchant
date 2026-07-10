@@ -61,6 +61,21 @@ async function readApiResponse(response, fallbackMessage) {
   return payload?.data ?? payload
 }
 
+function interpolateApiPath(template, values) {
+  return template.replace(/:([a-zA-Z0-9_]+)/g, (_match, key) => values[key] ?? '')
+}
+
+function buildQrImagePayload({ menuUrl, qrImageDataUrl }) {
+  return {
+    dataUrl: qrImageDataUrl,
+    imageDataUrl: qrImageDataUrl,
+    menuUrl,
+    publicUrl: menuUrl,
+    qrImageDataUrl,
+    qrImageUrl: qrImageDataUrl,
+  }
+}
+
 export async function createMenuBoard({ contentType, fileName, storeId, title = '메뉴판' }) {
   const response = await apiFetch(`/stores/${storeId}/menu-boards`, {
     body: JSON.stringify({
@@ -176,4 +191,44 @@ export async function publishMenuBoard({ menuBoardId, publicBaseUrl }) {
   })
 
   return readApiResponse(response, '메뉴판을 발행하지 못했습니다.')
+}
+
+export async function savePublishedQrImage({ menuBoardId, menuUrl, qrImageDataUrl }) {
+  const customPath = env.qrImageSavePath
+    ? interpolateApiPath(env.qrImageSavePath, { menuBoardId })
+    : ''
+
+  const candidatePaths = [
+    customPath,
+    `/menu-boards/${menuBoardId}/qr-image`,
+    `/menu-boards/${menuBoardId}/qr`,
+    `/menu-boards/${menuBoardId}/publications/qr-image`,
+    `/menu-boards/${menuBoardId}/publications/qr`,
+  ].filter(Boolean)
+
+  const payload = buildQrImagePayload({ menuUrl, qrImageDataUrl })
+  let lastError = null
+
+  for (const path of candidatePaths) {
+    for (const method of ['PATCH', 'POST']) {
+      const response = await apiFetch(path, {
+        body: JSON.stringify(payload),
+        method,
+      })
+
+      if (response.ok) {
+        return readApiResponse(response, 'QR 이미지를 저장하지 못했습니다.')
+      }
+
+      const result = await response.json().catch(() => null)
+      const message = result?.error?.message || 'QR 이미지를 저장하지 못했습니다.'
+      lastError = new Error(message)
+
+      if (response.status === 401 || response.status === 403) {
+        throw lastError
+      }
+    }
+  }
+
+  throw lastError || new Error('QR 이미지 저장 API를 찾지 못했습니다.')
 }
