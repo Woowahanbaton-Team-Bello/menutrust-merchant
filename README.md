@@ -1,6 +1,6 @@
-# MenuTrust Merchant
+# 두입세입 Merchant
 
-MenuTrust merchant-facing allergy menu management web app prototype.
+두입세입 merchant-facing allergy menu management web app prototype.
 
 ## Commands
 
@@ -10,6 +10,18 @@ npm run build
 npm run preview
 npm run lint
 ```
+
+## Environment
+
+```bash
+cp .env.example .env.local
+```
+
+- `VITE_SUPABASE_URL`: Supabase project URL
+- `VITE_SUPABASE_ANON_KEY`: Supabase anon key
+- `VITE_API_BASE_URL`: Supabase Edge Functions API base URL
+- `VITE_APP_BASE_URL`: customer app base URL exposed to the Vite client
+- `PUBLIC_APP_BASE_URL`: customer app base URL kept for deployment/runtime reference
 
 ## Notes
 

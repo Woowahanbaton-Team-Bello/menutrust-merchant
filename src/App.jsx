@@ -15,9 +15,11 @@ import {
 import './App.css'
 import { ALLERGENS } from './domain/allergy.js'
 import { RAW_MENU, STEP_LABELS } from './domain/merchantDemo.js'
+import { env } from './lib/env.js'
 
+const APP_NAME = '두입세입'
 const STORE_NAME = '우아타이'
-const MENU_URL = 'menutrust-demo.vercel.app/m/wooa-thai'
+const MENU_URL = env.appBaseUrl || 'menutrust-demo.vercel.app/m/wooa-thai'
 
 const allergenOptions = ALLERGENS.map((allergen) => allergen.label)
 
@@ -239,10 +241,10 @@ function AuthScreen({
       <section className="auth-panel" aria-labelledby="auth-title">
         <div className="auth-brand">
           <span className="brand-box" />
-          <span>{STORE_NAME}</span>
+          <span>{APP_NAME}</span>
         </div>
         <h1 id="auth-title">{isSignup ? '매장 정보를 입력해주세요' : '사장님 로그인'}</h1>
-        <p>{isSignup ? 'MenuTrust 매장 계정을 만들고 메뉴판을 관리하세요.' : '알레르기 메뉴판을 관리하세요'}</p>
+        <p>{isSignup ? `${APP_NAME} 매장 계정을 만들고 메뉴판을 관리하세요.` : '알레르기 메뉴판을 관리하세요'}</p>
 
         <form
           className="auth-form"
