@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import QRCode from 'qrcode'
 import {
   Check,
   CheckCircle2,
@@ -15,11 +16,22 @@ import {
 import './App.css'
 import { ALLERGENS } from './domain/allergy.js'
 import { STEP_LABELS } from './domain/merchantDemo.js'
-import { apiFetch, registerStore } from './lib/api.js'
+import {
+  apiFetch,
+  createMenuBoard,
+  fetchMenuBoardDetail,
+  markBoardAllergenReview,
+  markMenuBoardImageUploaded,
+  publishMenuBoard,
+  registerStore,
+  runAllergenAnalysis,
+  runMockFullAnalysis,
+  saveAllergens,
+  saveMenuItems,
+} from './lib/api.js'
 import { env } from './lib/env.js'
 import {
-  extractEditableItems,
-  extractMenuBoardDetail,
+  buildEditableItemsFromApiMenuItems,
   extractMenuBoards,
   getMenuBoardId,
   summarizeMenuBoard,
@@ -35,17 +47,26 @@ const EMPTY_AUTH_FORM = {
   storeName: '',
   confirmPassword: '',
 }
-const MENU_BOARD_DETAIL_PATHS = [
-  (menuBoardId) => `/menu-boards/${menuBoardId}`,
-  (menuBoardId) => `/menu-board/${menuBoardId}`,
-  (menuBoardId) => `/menu-boards/me/${menuBoardId}`,
-]
 const PENDING_STORE_REGISTRATION_KEY = 'menutrust.pending-store-registration'
+const MENU_BOARD_SELECTION_KEY = 'menutrust.menu-board-selection'
 
 const allergenOptions = ALLERGENS.map((allergen) => allergen.label)
+const allergenCodeByLabel = new Map(ALLERGENS.map((allergen) => [allergen.label, allergen.id]))
 
 function formatPrice(price) {
   return `${Number(price).toLocaleString('ko-KR')}원`
+}
+
+function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return '0B'
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)}KB`
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
 }
 
 function statusLabel(status) {
@@ -121,6 +142,39 @@ function clearPendingStoreRegistration() {
   window.localStorage.removeItem(PENDING_STORE_REGISTRATION_KEY)
 }
 
+function readMenuBoardSelections() {
+  if (typeof window === 'undefined') return {}
+
+  const raw = window.localStorage.getItem(MENU_BOARD_SELECTION_KEY)
+
+  if (!raw) return {}
+
+  try {
+    const parsed = JSON.parse(raw)
+
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function readStoredMenuBoardId(storeId) {
+  if (!storeId) return ''
+
+  const selections = readMenuBoardSelections()
+  const value = selections[storeId]
+
+  return typeof value === 'string' ? value : ''
+}
+
+function writeStoredMenuBoardId(storeId, menuBoardId) {
+  if (typeof window === 'undefined' || !storeId || !menuBoardId) return
+
+  const selections = readMenuBoardSelections()
+  selections[storeId] = menuBoardId
+  window.localStorage.setItem(MENU_BOARD_SELECTION_KEY, JSON.stringify(selections))
+}
+
 function App() {
   const [phase, setPhase] = useState('login')
   const [step, setStep] = useState(1)
@@ -137,12 +191,23 @@ function App() {
   const [menuBoards, setMenuBoards] = useState([])
   const [isMenuBoardsLoading, setIsMenuBoardsLoading] = useState(false)
   const [menuBoardsError, setMenuBoardsError] = useState('')
+  const [selectedStoreId, setSelectedStoreId] = useState('')
   const [selectedMenuBoardId, setSelectedMenuBoardId] = useState('')
+  const [selectedMenuBoardTitle, setSelectedMenuBoardTitle] = useState('')
   const [isMenuBoardDetailLoading, setIsMenuBoardDetailLoading] = useState(false)
   const [menuBoardDetailError, setMenuBoardDetailError] = useState('')
   const [pendingStoreRegistration, setPendingStoreRegistration] = useState(() => readPendingStoreRegistration())
   const [isStoreRegistrationLoading, setIsStoreRegistrationLoading] = useState(false)
   const [storeRegistrationError, setStoreRegistrationError] = useState('')
+  const [uploadError, setUploadError] = useState('')
+  const [uploadedImage, setUploadedImage] = useState(null)
+  const [isUploadSubmitting, setIsUploadSubmitting] = useState(false)
+  const [isAllergenSaving, setIsAllergenSaving] = useState(false)
+  const [isPublishing, setIsPublishing] = useState(false)
+  const [isStepResultSubmitting, setIsStepResultSubmitting] = useState(false)
+  const [menuBoardRefreshKey, setMenuBoardRefreshKey] = useState(0)
+  const [publishedMenu, setPublishedMenu] = useState(null)
+  const [qrImageUrl, setQrImageUrl] = useState('')
 
   const itemCount = items.length
   const currentStep = useMemo(
@@ -154,14 +219,30 @@ function App() {
     [menuBoards],
   )
   const selectedMenuBoardSummary = useMemo(
-    () => menuBoardSummaries.find((board) => board.id === selectedMenuBoardId) || menuBoardSummaries[0] || null,
-    [menuBoardSummaries, selectedMenuBoardId],
+    () => menuBoardSummaries.find((board) => board.id === selectedStoreId) || menuBoardSummaries[0] || null,
+    [menuBoardSummaries, selectedStoreId],
   )
   const storeName = useMemo(() => getUserStoreName(user), [user])
 
   function updateItem(index, updater) {
     setItems((current) => current.map((item, i) => (i === index ? updater(item) : item)))
   }
+
+  useEffect(() => {
+    return () => {
+      if (uploadedImage?.previewUrl) {
+        URL.revokeObjectURL(uploadedImage.previewUrl)
+      }
+    }
+  }, [uploadedImage])
+
+  useEffect(() => {
+    if (!selectedStoreId || !selectedMenuBoardId) {
+      return
+    }
+
+    writeStoredMenuBoardId(selectedStoreId, selectedMenuBoardId)
+  }, [selectedMenuBoardId, selectedStoreId])
 
   useEffect(() => {
     let isMounted = true
@@ -262,7 +343,9 @@ function App() {
         setMenuBoards([])
         setMenuBoardsError('')
         setIsMenuBoardsLoading(false)
+        setSelectedStoreId('')
         setSelectedMenuBoardId('')
+        setSelectedMenuBoardTitle('')
         setMenuBoardDetailError('')
         setItems([])
         return
@@ -277,11 +360,11 @@ function App() {
       setMenuBoardsError('')
 
       try {
-        const response = await apiFetch('/menu-boards/me')
+        const response = await apiFetch('/owner/me')
         const payload = await response.json().catch(() => null)
 
         if (!response.ok) {
-          const errorMessage = payload?.error?.message || '메뉴판 목록을 불러오지 못했습니다.'
+          const errorMessage = payload?.error?.message || '가게 목록을 불러오지 못했습니다.'
           throw new Error(errorMessage)
         }
 
@@ -290,19 +373,36 @@ function App() {
         const nextMenuBoards = extractMenuBoards(payload)
 
         setMenuBoards(nextMenuBoards)
-        setSelectedMenuBoardId((current) => (
-          nextMenuBoards.some((board, index) => getMenuBoardId(board, index) === current)
+        setSelectedStoreId((current) => {
+          const nextStoreId = nextMenuBoards.some((board, index) => getMenuBoardId(board, index) === current)
             ? current
             : (nextMenuBoards[0] ? getMenuBoardId(nextMenuBoards[0], 0) : '')
-        ))
-        setPhase(nextMenuBoards.length > 0 ? 'home' : 'flow')
+
+          setSelectedMenuBoardId(readStoredMenuBoardId(nextStoreId))
+          return nextStoreId
+        })
+        if (
+          nextMenuBoards.length > 0
+          && phase === 'flow'
+          && step === 1
+          && !uploadedImage?.file
+          && !isUploadSubmitting
+          && !isAllergenSaving
+          && !isPublishing
+        ) {
+          setPhase('home')
+        } else if (nextMenuBoards.length === 0) {
+          setPhase('flow')
+        }
       } catch (error) {
         if (!isMounted) return
 
         setMenuBoards([])
+        setSelectedStoreId('')
         setSelectedMenuBoardId('')
+        setSelectedMenuBoardTitle('')
         setMenuBoardsError(
-          error instanceof Error ? error.message : '메뉴판 목록을 불러오지 못했습니다.',
+          error instanceof Error ? error.message : '가게 목록을 불러오지 못했습니다.',
         )
         setItems([])
         setPhase('flow')
@@ -318,68 +418,124 @@ function App() {
     return () => {
       isMounted = false
     }
-  }, [isStoreRegistrationLoading, pendingStoreRegistration, user])
+  }, [
+    isAllergenSaving,
+    isPublishing,
+    isStoreRegistrationLoading,
+    isUploadSubmitting,
+    menuBoardRefreshKey,
+    pendingStoreRegistration,
+    phase,
+    step,
+    uploadedImage,
+    user,
+  ])
 
   useEffect(() => {
     let isMounted = true
 
     async function loadMenuBoardDetail() {
-      if (!user || !selectedMenuBoardId) {
+      if (!user || !selectedStoreId) {
         setMenuBoardDetailError('')
         setIsMenuBoardDetailLoading(false)
+        setSelectedMenuBoardTitle('')
         setItems([])
         return
       }
-
-      const fallbackBoard =
-        menuBoards.find((board, index) => getMenuBoardId(board, index) === selectedMenuBoardId) || null
 
       setIsMenuBoardDetailLoading(true)
       setMenuBoardDetailError('')
 
       try {
+        const candidateBoardIds = [
+          selectedMenuBoardId,
+          readStoredMenuBoardId(selectedStoreId),
+        ].filter(Boolean)
+
         let detail = null
-        let lastError = null
+        let nextMenuBoardId = ''
 
-        for (const createPath of MENU_BOARD_DETAIL_PATHS) {
-          const response = await apiFetch(createPath(selectedMenuBoardId))
-          const payload = await response.json().catch(() => null)
-
-          if (response.ok) {
-            detail = extractMenuBoardDetail(payload)
+        for (const candidateBoardId of candidateBoardIds) {
+          try {
+            detail = await fetchMenuBoardDetail(candidateBoardId)
+            nextMenuBoardId = candidateBoardId
             break
-          }
-
-          if (response.status === 404) {
+          } catch {
             continue
           }
-
-          lastError = new Error(
-            payload?.error?.message || '메뉴판 상세 정보를 불러오지 못했습니다.',
-          )
-          break
-        }
-
-        if (!detail && fallbackBoard) {
-          detail = fallbackBoard
         }
 
         if (!detail) {
-          throw lastError || new Error('메뉴판 상세 정보를 불러오지 못했습니다.')
+          // Prefer the published board shown on the dashboard. If none exists, fall back to the latest draft.
+          const { data: publishedMenu, error: publishedMenuError } = await supabase
+            .from('public_menus')
+            .select('menu_board_id')
+            .eq('store_id', selectedStoreId)
+            .eq('status', 'published')
+            .maybeSingle()
+
+          if (publishedMenuError) {
+            throw publishedMenuError
+          }
+
+          if (publishedMenu?.menu_board_id) {
+            nextMenuBoardId = publishedMenu.menu_board_id
+          } else {
+            // `owner/me` currently returns stores only, so resolve the latest board id as a fallback.
+            const { data: menuBoardRows, error: menuBoardLookupError } = await supabase
+              .from('menu_boards')
+              .select('id, title')
+              .eq('store_id', selectedStoreId)
+              .order('created_at', { ascending: false })
+              .limit(1)
+
+            if (menuBoardLookupError) {
+              throw menuBoardLookupError
+            }
+
+            const latestMenuBoard = menuBoardRows?.[0] || null
+
+            if (!latestMenuBoard) {
+              if (!isMounted) return
+
+              setSelectedMenuBoardTitle('')
+              setItems([])
+              return
+            }
+
+            nextMenuBoardId = latestMenuBoard.id
+          }
+
+          detail = await fetchMenuBoardDetail(nextMenuBoardId)
         }
 
         if (!isMounted) return
 
-        const nextItems = extractEditableItems(detail).map((item) => ({
+        setSelectedMenuBoardId(nextMenuBoardId)
+        setSelectedMenuBoardTitle(detail.menuBoard?.title || '')
+
+        const nextItems = buildEditableItemsFromApiMenuItems(detail.menuItems).map((item) => ({
           ...item,
           allergenDraft: item.allergenDraft || allergenOptions[0],
+          removedIngredients: [],
         }))
 
         setItems(nextItems)
+
+        if (
+          detail.menuBoard?.id
+          && phase === 'flow'
+          && step === 1
+          && !uploadedImage?.file
+          && !isUploadSubmitting
+        ) {
+          setPhase('home')
+        }
       } catch (error) {
         if (!isMounted) return
 
         setItems([])
+        setSelectedMenuBoardTitle('')
         setMenuBoardDetailError(
           error instanceof Error ? error.message : '메뉴판 상세 정보를 불러오지 못했습니다.',
         )
@@ -395,12 +551,311 @@ function App() {
     return () => {
       isMounted = false
     }
-  }, [menuBoards, selectedMenuBoardId, user])
+  }, [isUploadSubmitting, menuBoardRefreshKey, phase, selectedMenuBoardId, selectedStoreId, step, uploadedImage, user])
 
   function beginFlow() {
     setAppError('')
     setPhase('flow')
     setStep(1)
+  }
+
+  function handleStoreSelect(storeId) {
+    setSelectedStoreId(storeId)
+    setSelectedMenuBoardId(readStoredMenuBoardId(storeId))
+    setSelectedMenuBoardTitle('')
+    setMenuBoardDetailError('')
+    setItems([])
+  }
+
+  function handleImageSelect(file) {
+    if (!file) {
+      return
+    }
+
+    if (!file.type.startsWith('image/')) {
+      setUploadError('이미지 파일만 업로드할 수 있습니다.')
+      return
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      setUploadError('이미지 크기는 10MB 이하여야 합니다.')
+      return
+    }
+
+    if (uploadedImage?.previewUrl) {
+      URL.revokeObjectURL(uploadedImage.previewUrl)
+    }
+
+    setUploadError('')
+    setUploadedImage({
+      file,
+      name: file.name,
+      previewUrl: URL.createObjectURL(file),
+      size: file.size,
+      type: file.type || '이미지',
+    })
+  }
+
+  async function handleUploadStart() {
+    if (!uploadedImage?.file) {
+      setUploadError('먼저 메뉴판 이미지를 선택해주세요.')
+      return
+    }
+
+    if (!selectedStoreId) {
+      setUploadError('업로드할 매장 정보를 찾지 못했습니다.')
+      return
+    }
+
+    setUploadError('')
+    setAppError('')
+    setIsUploadSubmitting(true)
+
+    try {
+      const createdBoard = await createMenuBoard({
+        contentType: uploadedImage.file.type || 'image/jpeg',
+        fileName: uploadedImage.file.name,
+        storeId: selectedStoreId,
+        title: `${storeName} 메뉴판`,
+      })
+
+      const { error: storageError } = await supabase.storage
+        .from(createdBoard.upload.bucket)
+        .uploadToSignedUrl(
+          createdBoard.upload.path,
+          createdBoard.upload.token,
+          uploadedImage.file,
+          {
+            contentType: uploadedImage.file.type || 'image/jpeg',
+            upsert: true,
+          },
+        )
+
+      if (storageError) {
+        throw storageError
+      }
+
+      await markMenuBoardImageUploaded({
+        bucket: createdBoard.upload.bucket,
+        contentType: uploadedImage.file.type || 'image/jpeg',
+        menuBoardId: createdBoard.menuBoard.id,
+        path: createdBoard.upload.path,
+      })
+
+      const analysis = await runMockFullAnalysis({
+        menuBoardId: createdBoard.menuBoard.id,
+      })
+
+      const nextItems = buildEditableItemsFromApiMenuItems(analysis.menuItems).map((item) => ({
+        ...item,
+        allergenDraft: item.allergenDraft || allergenOptions[0],
+        removedIngredients: [],
+      }))
+
+      setSelectedMenuBoardId(createdBoard.menuBoard.id)
+      setSelectedMenuBoardTitle(
+        analysis.menuBoard?.title || createdBoard.menuBoard.title || `${storeName} 메뉴판`,
+      )
+      setItems(nextItems)
+      setMenuBoardDetailError('')
+      setMenuBoardsError('')
+      setMenuBoardRefreshKey((current) => current + 1)
+      setStep(2)
+    } catch (error) {
+      setUploadError(
+        error instanceof Error ? error.message : '이미지 업로드를 처리하지 못했습니다.',
+      )
+    } finally {
+      setIsUploadSubmitting(false)
+    }
+  }
+
+  async function handleBoardResultOpen(nextStep) {
+    if (!selectedMenuBoardId) {
+      setAppError('메뉴판 정보를 찾지 못했습니다.')
+      return
+    }
+
+    setAppError('')
+    setMenuBoardDetailError('')
+    setIsStepResultSubmitting(true)
+
+    try {
+      let detail = await fetchMenuBoardDetail(selectedMenuBoardId)
+
+      if (nextStep === 5) {
+        const hasAnyAllergens = (detail.menuItems || []).some(
+          (menuItem) => Array.isArray(menuItem.allergens) && menuItem.allergens.length > 0,
+        )
+
+        if (!hasAnyAllergens) {
+          await runAllergenAnalysis({
+            menuBoardId: selectedMenuBoardId,
+          })
+
+          detail = await fetchMenuBoardDetail(selectedMenuBoardId)
+        }
+      }
+
+      const nextItems = buildEditableItemsFromApiMenuItems(detail.menuItems).map((item) => ({
+        ...item,
+        allergenDraft: item.allergenDraft || allergenOptions[0],
+        removedIngredients: [],
+      }))
+
+      setItems(nextItems)
+      setSelectedMenuBoardTitle(detail.menuBoard?.title || selectedMenuBoardTitle)
+      setMenuBoardRefreshKey((current) => current + 1)
+      setStep(nextStep)
+    } catch (error) {
+      setAppError(
+        error instanceof Error ? error.message : '메뉴판 정보를 불러오지 못했습니다.',
+      )
+    } finally {
+      setIsStepResultSubmitting(false)
+    }
+  }
+
+  function buildMenuItemPayload(item, index) {
+    return {
+      category: item.category || '기타',
+      id: item.id?.startsWith?.('menu-') ? undefined : item.id,
+      isActive: true,
+      nameKo: item.name,
+      priceKrw: Number(item.price) || 0,
+      sortOrder: index + 1,
+    }
+  }
+
+  function buildAllergenPayload(item) {
+    return {
+      allergens: item.allergens.map((allergen) => {
+        const code = allergen.code || allergenCodeByLabel.get(allergen.name) || ''
+
+        return {
+          code,
+          reason: allergen.reason || `${allergen.name} 알레르겐 검수`,
+          sourceIngredientNames: Array.isArray(allergen.sourceIngredientNames)
+            ? allergen.sourceIngredientNames
+            : [],
+          status: allergen.status,
+        }
+      }),
+      menuItemId: item.id,
+    }
+  }
+
+  async function handleAllergenSaveAndContinue() {
+    if (!selectedMenuBoardId) {
+      setAppError('알레르겐 정보를 저장할 메뉴판을 찾지 못했습니다.')
+      return
+    }
+
+    setAppError('')
+    setMenuBoardDetailError('')
+    setIsAllergenSaving(true)
+
+    try {
+      const menuSaveResult = await saveMenuItems({
+        items: items.map((item, index) => buildMenuItemPayload(item, index)),
+        menuBoardId: selectedMenuBoardId,
+      })
+
+      const savedItems = items.map((item, index) => ({
+        ...item,
+        id: menuSaveResult.menuItems?.[index]?.id || item.id,
+      }))
+
+      const hasInvalidAllergenCode = savedItems.some((item) => (
+        item.allergens.some((allergen) => !(allergen.code || allergenCodeByLabel.get(allergen.name)))
+      ))
+
+      if (hasInvalidAllergenCode) {
+        throw new Error('일부 알레르겐 코드를 찾지 못했습니다.')
+      }
+
+      await saveAllergens({
+        items: savedItems.map((item) => buildAllergenPayload(item)),
+        menuBoardId: selectedMenuBoardId,
+      })
+
+      await markBoardAllergenReview({
+        menuBoardId: selectedMenuBoardId,
+      })
+
+      const detail = await fetchMenuBoardDetail(selectedMenuBoardId)
+      const nextItems = buildEditableItemsFromApiMenuItems(detail.menuItems).map((item) => ({
+        ...item,
+        allergenDraft: item.allergenDraft || allergenOptions[0],
+        removedIngredients: [],
+      }))
+
+      setItems(nextItems)
+      setSelectedMenuBoardTitle(detail.menuBoard?.title || selectedMenuBoardTitle)
+      setMenuBoardRefreshKey((current) => current + 1)
+      setStep(6)
+    } catch (error) {
+      setAppError(
+        error instanceof Error ? error.message : '알레르겐 정보를 저장하지 못했습니다.',
+      )
+    } finally {
+      setIsAllergenSaving(false)
+    }
+  }
+
+  async function createQrImage(menuUrl) {
+    return QRCode.toDataURL(menuUrl, {
+      errorCorrectionLevel: 'M',
+      margin: 2,
+      width: 360,
+    })
+  }
+
+  async function handlePublishStart() {
+    if (!selectedMenuBoardId) {
+      setAppError('발행할 메뉴판 정보를 찾지 못했습니다.')
+      return
+    }
+
+    setAppError('')
+    setIsPublishing(true)
+
+    try {
+      const result = await publishMenuBoard({
+        menuBoardId: selectedMenuBoardId,
+        publicBaseUrl: env.appBaseUrl || undefined,
+      })
+
+      const nextMenuUrl = result.publicMenu?.publicUrl || ''
+
+      if (!nextMenuUrl) {
+        throw new Error('발행된 메뉴판 링크를 받지 못했습니다.')
+      }
+
+      const nextQrImageUrl = await createQrImage(nextMenuUrl)
+
+      setPublishedMenu(result.publicMenu)
+      setQrImageUrl(nextQrImageUrl)
+      setMenuBoardRefreshKey((current) => current + 1)
+      setStep(7)
+    } catch (error) {
+      setAppError(
+        error instanceof Error ? error.message : 'QR 발행을 완료하지 못했습니다.',
+      )
+    } finally {
+      setIsPublishing(false)
+    }
+  }
+
+  function handleQrDownload() {
+    if (!qrImageUrl) {
+      return
+    }
+
+    const anchor = document.createElement('a')
+    anchor.href = qrImageUrl
+    anchor.download = `${storeName}-qr-code.png`
+    anchor.click()
   }
 
   async function handleAuthSubmit() {
@@ -531,14 +986,15 @@ function App() {
     setItems((current) => [
       ...current,
       {
+        allergenDraft: allergenOptions[0],
+        allergens: [],
         name,
         price,
         category,
         ingredients: [],
         unchecked: [],
-        allergens: [],
         draft: '',
-        allergenDraft: allergenOptions[0],
+        removedIngredients: [],
       },
     ])
     setNewMenu({ name: '', price: '', category: '' })
@@ -576,19 +1032,13 @@ function App() {
     <div className="merchant-app">
       <Sidebar
         appError={appError}
-        itemCount={itemCount}
-        isMenuBoardDetailLoading={isMenuBoardDetailLoading}
         isLogoutPending={isLogoutPending}
-        isMenuBoardsLoading={isMenuBoardsLoading}
-        isStoreRegistrationLoading={isStoreRegistrationLoading}
-        menuBoardCount={menuBoards.length}
         menuBoardDetailError={menuBoardDetailError}
         menuBoardsError={menuBoardsError}
         phase={phase}
         step={step}
         storeRegistrationError={storeRegistrationError}
         storeName={storeName}
-        userEmail={user?.email || ''}
         onLogout={logout}
         onStepChange={(nextStep) => {
           setAppError('')
@@ -602,15 +1052,17 @@ function App() {
           <HomeDashboard
             itemCount={itemCount}
             menuBoardDetailError={menuBoardDetailError}
-            selectedMenuBoardId={selectedMenuBoardId}
-            selectedMenuBoardSummary={selectedMenuBoardSummary}
+            menuUrl={publishedMenu?.publicUrl || MENU_URL}
+            selectedStoreId={selectedStoreId}
             menuBoardSummaries={menuBoardSummaries}
             menuBoardsError={menuBoardsError}
             items={items}
             isMenuBoardDetailLoading={isMenuBoardDetailLoading}
             isMenuBoardsLoading={isMenuBoardsLoading}
+            qrImageUrl={qrImageUrl}
             storeName={storeName}
-            onBoardSelect={setSelectedMenuBoardId}
+            onBoardSelect={handleStoreSelect}
+            onDownloadQr={handleQrDownload}
             onEditMenu={() => {
               setAppError('')
               setPhase('flow')
@@ -625,13 +1077,21 @@ function App() {
         ) : (
           <FlowScreen
             boardDetailError={menuBoardDetailError}
-            boardTitle={selectedMenuBoardSummary?.title || ''}
+            boardTitle={selectedMenuBoardTitle || selectedMenuBoardSummary?.title || ''}
             currentStep={currentStep}
             itemCount={itemCount}
             items={items}
+            isAllergenSaving={isAllergenSaving}
             isBoardDetailLoading={isMenuBoardDetailLoading}
+            isPublishing={isPublishing}
+            isStepResultSubmitting={isStepResultSubmitting}
+            isUploadSubmitting={isUploadSubmitting}
+            menuUrl={publishedMenu?.publicUrl || MENU_URL}
             newMenu={newMenu}
+            qrImageUrl={qrImageUrl}
             step={step}
+            uploadError={uploadError}
+            uploadedImage={uploadedImage}
             onAddAllergen={(itemIndex) => {
               updateItem(itemIndex, (item) => {
                 const remaining = allergenOptions.filter(
@@ -665,21 +1125,24 @@ function App() {
             onAllergenDraftChange={(itemIndex, value) => {
               updateItem(itemIndex, (item) => ({ ...item, allergenDraft: value }))
             }}
+            onAllergenSaveAndContinue={handleAllergenSaveAndContinue}
             onIngredientDraftChange={(itemIndex, value) => {
               updateItem(itemIndex, (item) => ({ ...item, draft: value }))
             }}
             onNewMenuChange={setNewMenu}
-            onRemoveAllergen={(itemIndex, allergenIndex) => {
-              updateItem(itemIndex, (item) => ({
-                ...item,
-                allergens: item.allergens.filter((_, i) => i !== allergenIndex),
-              }))
-            }}
+            onBoardResultOpen={handleBoardResultOpen}
             onRemoveIngredient={(itemIndex, ingredientIndex) => {
-              updateItem(itemIndex, (item) => ({
-                ...item,
-                ingredients: item.ingredients.filter((_, i) => i !== ingredientIndex),
-              }))
+              updateItem(itemIndex, (item) => {
+                const targetIngredient = item.ingredients[ingredientIndex]
+
+                return {
+                  ...item,
+                  ingredients: item.ingredients.filter((_, i) => i !== ingredientIndex),
+                  removedIngredients: targetIngredient?.id
+                    ? [...(item.removedIngredients || []), { ...targetIngredient, checked: false }]
+                    : (item.removedIngredients || []),
+                }
+              })
             }}
             onSetAllergenStatus={(itemIndex, allergenIndex, status) => {
               updateItem(itemIndex, (item) => ({
@@ -700,6 +1163,10 @@ function App() {
                 )),
               }))
             }}
+            onUploadImageSelect={handleImageSelect}
+            onUploadStart={handleUploadStart}
+            onPublishStart={handlePublishStart}
+            onQrDownload={handleQrDownload}
             onViewHome={() => setPhase('home')}
           />
         )}
@@ -821,19 +1288,13 @@ function AuthLoadingScreen() {
 
 function Sidebar({
   appError,
-  itemCount,
-  isMenuBoardDetailLoading,
   isLogoutPending,
-  isMenuBoardsLoading,
-  isStoreRegistrationLoading,
-  menuBoardCount,
   menuBoardDetailError,
   menuBoardsError,
   phase,
   step,
   storeRegistrationError,
   storeName,
-  userEmail,
   onLogout,
   onStepChange,
 }) {
@@ -864,19 +1325,6 @@ function Sidebar({
       </nav>
 
       <div className="sidebar-footer">
-        <p>
-          {userEmail
-            ? `${userEmail} 계정으로 로그인됨 · ${
-                isStoreRegistrationLoading
-                  ? '가게 등록 중'
-                  : isMenuBoardsLoading
-                  ? '메뉴판 목록 확인 중'
-                  : isMenuBoardDetailLoading
-                    ? '메뉴판 상세 확인 중'
-                    : `연결된 메뉴판 ${menuBoardCount}개 · 현재 메뉴 ${itemCount}개`
-              }`
-            : `${storeName} 메뉴 ${itemCount}개 기준 데모입니다.`}
-        </p>
         {storeRegistrationError ? <p className="sidebar-feedback">{storeRegistrationError}</p> : null}
         {menuBoardsError ? <p className="sidebar-feedback">{menuBoardsError}</p> : null}
         {menuBoardDetailError ? <p className="sidebar-feedback">{menuBoardDetailError}</p> : null}
@@ -897,21 +1345,34 @@ function FlowScreen(props) {
     currentStep,
     itemCount,
     items,
+    isAllergenSaving,
     isBoardDetailLoading,
+    isPublishing,
+    isStepResultSubmitting,
+    isUploadSubmitting,
+    menuUrl,
     newMenu,
+    qrImageUrl,
     step,
     onAddAllergen,
+    onAllergenSaveAndContinue,
+    onBoardResultOpen,
     onAddIngredient,
     onAddMenu,
     onAllergenDraftChange,
     onIngredientDraftChange,
     onNewMenuChange,
-    onRemoveAllergen,
     onRemoveIngredient,
     onSetAllergenStatus,
     onStepChange,
     onToggleIngredient,
+    onPublishStart,
+    onQrDownload,
+    onUploadImageSelect,
+    onUploadStart,
     onViewHome,
+    uploadError,
+    uploadedImage,
   } = props
 
   return (
@@ -927,14 +1388,23 @@ function FlowScreen(props) {
         <span className="progress-pill">{itemCount}개 메뉴</span>
       </div>
 
-      {step === 1 && <UploadStep onNext={() => onStepChange(2)} />}
+      {step === 1 && (
+        <UploadStep
+          error={uploadError}
+          image={uploadedImage}
+          isSubmitting={isUploadSubmitting}
+          onFileSelect={onUploadImageSelect}
+          onNext={onUploadStart}
+        />
+      )}
       {step === 2 && (
         <AnalysisStep
           icon={<Sparkles size={30} />}
+          isSubmitting={isStepResultSubmitting}
           title="메뉴와 재료를 분석하고 있어요"
           description="메뉴명 · 가격 · 식재료 후보를 추출하는 중입니다"
           actionLabel="결과 화면 미리보기"
-          onNext={() => onStepChange(3)}
+          onNext={() => onBoardResultOpen(3)}
         />
       )}
       {step === 3 && (
@@ -952,58 +1422,77 @@ function FlowScreen(props) {
       )}
       {step === 4 && (
         <AnalysisStep
+          isSubmitting={isStepResultSubmitting}
           icon={<FileText size={30} />}
           title="알레르겐을 분석하고 있어요"
           description="확인된 재료를 기준으로 22가지 알레르겐 항목을 대조하는 중입니다"
           actionLabel="알레르겐 결과 보기"
-          onNext={() => onStepChange(5)}
+          onNext={() => onBoardResultOpen(5)}
         />
       )}
       {step === 5 && (
         <AllergenStep
+          isSaving={isAllergenSaving}
           items={items}
           onAddAllergen={onAddAllergen}
           onAllergenDraftChange={onAllergenDraftChange}
-          onNext={() => onStepChange(6)}
-          onRemoveAllergen={onRemoveAllergen}
+          onNext={onAllergenSaveAndContinue}
           onSetAllergenStatus={onSetAllergenStatus}
         />
       )}
-      {step === 6 && <PublishStep itemCount={itemCount} onNext={() => onStepChange(7)} />}
-      {step === 7 && <QrStep onViewHome={onViewHome} />}
+      {step === 6 && <PublishStep isSubmitting={isPublishing} itemCount={itemCount} onNext={onPublishStart} />}
+      {step === 7 && <QrStep menuUrl={menuUrl} onDownloadQr={onQrDownload} onViewHome={onViewHome} qrImageUrl={qrImageUrl} />}
     </section>
   )
 }
 
-function UploadStep({ onNext }) {
+function UploadStep({ error, image, isSubmitting, onFileSelect, onNext }) {
   return (
     <div className="upload-layout">
-      <div className="upload-dropzone">
+      <label className="upload-dropzone">
+        <input
+          accept="image/*"
+          className="upload-input"
+          disabled={isSubmitting}
+          type="file"
+          onChange={(event) => onFileSelect(event.target.files?.[0] || null)}
+        />
         <Image size={44} />
-        <strong>메뉴판 이미지를 업로드하세요</strong>
+        <strong>{image ? '다른 메뉴판 이미지로 교체할 수 있어요' : '메뉴판 이미지를 업로드하세요'}</strong>
         <p>사진 한 장이면 메뉴명, 가격, 재료 후보까지 AI가 자동으로 인식해요.</p>
-        <button className="secondary-button" type="button">
+        <span className="secondary-button">
           <Upload size={16} />
-          다른 이미지 선택
-        </button>
-      </div>
-      <div className="upload-file">
-        <div className="file-thumbnail" />
-        <div>
-          <strong>menu-board.jpg</strong>
-          <p>업로드 완료</p>
-          <span>2.4MB · JPG</span>
+          {image ? '다른 이미지 선택' : '이미지 선택'}
+        </span>
+      </label>
+      {error ? <p className="empty-note">{error}</p> : null}
+      {image ? (
+        <div className="upload-file">
+          <div
+            className="file-thumbnail file-thumbnail--image"
+            style={{ backgroundImage: `url("${image.previewUrl}")` }}
+          />
+          <div>
+            <strong>{image.name}</strong>
+            <p>업로드 준비 완료</p>
+            <span>{formatFileSize(image.size)} · {image.type}</span>
+          </div>
         </div>
-      </div>
-      <button className="primary-button next-button" type="button" onClick={onNext}>
-        AI 재료 분석 시작하기
+      ) : null}
+      <button
+        className="primary-button next-button"
+        disabled={!image || isSubmitting}
+        type="button"
+        onClick={onNext}
+      >
+        {isSubmitting ? '업로드 중...' : 'AI 재료 분석 시작하기'}
         <ChevronRight size={17} />
       </button>
     </div>
   )
 }
 
-function AnalysisStep({ actionLabel, description, icon, onNext, title }) {
+function AnalysisStep({ actionLabel, description, icon, isSubmitting = false, onNext, title }) {
   return (
     <div className="analysis-panel">
       <div className="analysis-orbit">
@@ -1012,8 +1501,8 @@ function AnalysisStep({ actionLabel, description, icon, onNext, title }) {
       </div>
       <h2>{title}</h2>
       <p>{description}</p>
-      <button className="text-action" type="button" onClick={onNext}>
-        {actionLabel}
+      <button className="text-action" disabled={isSubmitting} type="button" onClick={onNext}>
+        {isSubmitting ? '분석 중...' : actionLabel}
         <ChevronRight size={15} />
       </button>
     </div>
@@ -1129,18 +1618,18 @@ function IngredientStep({
 }
 
 function AllergenStep({
+  isSaving,
   items,
   onAddAllergen,
   onAllergenDraftChange,
   onNext,
-  onRemoveAllergen,
   onSetAllergenStatus,
 }) {
   return (
     <div className="editor-stack">
       <header className="editor-copy">
         <h2>재료 기준으로 감지된 알레르겐이에요.</h2>
-        <p>상태를 눌러 바꾸거나, 식약처 22가지 알레르기 유발식품 목록에서 빠진 항목을 추가·삭제하세요.</p>
+        <p>상태를 눌러 바꾸거나, 식약처 22가지 알레르기 유발식품 목록에서 빠진 항목을 추가하세요.</p>
       </header>
 
       <div className="menu-editor-list">
@@ -1179,13 +1668,6 @@ function AllergenStep({
                         >
                           혼입 가능
                         </button>
-                        <button
-                          aria-label={`${allergen.name} 삭제`}
-                          type="button"
-                          onClick={() => onRemoveAllergen(itemIndex, allergenIndex)}
-                        >
-                          <Trash2 size={14} />
-                        </button>
                       </div>
                     </div>
                   ))
@@ -1216,15 +1698,15 @@ function AllergenStep({
         })}
       </div>
 
-      <button className="primary-button next-button" type="button" onClick={onNext}>
-        검수 완료 · 발행하러 가기
+      <button className="primary-button next-button" disabled={isSaving} type="button" onClick={onNext}>
+        {isSaving ? '저장 중...' : '검수 완료 · 발행하러 가기'}
         <ChevronRight size={17} />
       </button>
     </div>
   )
 }
 
-function PublishStep({ itemCount, onNext }) {
+function PublishStep({ isSubmitting, itemCount, onNext }) {
   return (
     <div className="publish-panel">
       <CheckCircle2 size={54} />
@@ -1234,19 +1716,19 @@ function PublishStep({ itemCount, onNext }) {
         <br />
         발행 후에도 언제든 재료를 수정할 수 있어요.
       </p>
-      <button className="primary-button" type="button" onClick={onNext}>
-        알레르기 메뉴판 발행하기
+      <button className="primary-button" disabled={isSubmitting} type="button" onClick={onNext}>
+        {isSubmitting ? '발행 중...' : '알레르기 메뉴판 발행하기'}
         <ChevronRight size={17} />
       </button>
     </div>
   )
 }
 
-function QrStep({ onViewHome }) {
+function QrStep({ menuUrl, onDownloadQr, onViewHome, qrImageUrl }) {
   return (
     <div className="qr-panel">
       <h2>발행 완료 · QR 생성됨</h2>
-      <QrBlock size="large" />
+      <QrBlock menuUrl={menuUrl} onDownloadQr={onDownloadQr} qrImageUrl={qrImageUrl} size="large" />
       <button className="text-action" type="button" onClick={onViewHome}>
         완료
         <ChevronRight size={15} />
@@ -1260,14 +1742,16 @@ function HomeDashboard({
   items,
   isMenuBoardDetailLoading,
   isMenuBoardsLoading,
+  menuUrl,
   menuBoardDetailError,
   onBoardSelect,
+  onDownloadQr,
   menuBoardsError,
   menuBoardSummaries,
   onEditMenu,
   onRepublish,
-  selectedMenuBoardId,
-  selectedMenuBoardSummary,
+  qrImageUrl,
+  selectedStoreId,
   storeName,
 }) {
   return (
@@ -1294,7 +1778,7 @@ function HomeDashboard({
           <div className="summary-list">
             {menuBoardSummaries.map((board) => (
               <button
-                className={`summary-row summary-row--button ${selectedMenuBoardId === board.id ? 'summary-row--active' : ''}`}
+                className={`summary-row summary-row--button ${selectedStoreId === board.id ? 'summary-row--active' : ''}`}
                 key={board.id}
                 type="button"
                 onClick={() => onBoardSelect(board.id)}
@@ -1315,8 +1799,8 @@ function HomeDashboard({
       </section>
 
       <div className="home-qr-section">
-        <QrBlock />
-        <button className="primary-button" type="button">
+        <QrBlock menuUrl={menuUrl} onDownloadQr={onDownloadQr} qrImageUrl={qrImageUrl} />
+        <button className="primary-button" disabled={!qrImageUrl} type="button" onClick={onDownloadQr}>
           QR 코드 출력하기
         </button>
       </div>
@@ -1328,11 +1812,6 @@ function HomeDashboard({
             메뉴판 수정하기
           </button>
         </div>
-        <p className="summary-note">
-          {selectedMenuBoardSummary
-            ? `${selectedMenuBoardSummary.title}의 메뉴 데이터를 보여주고 있습니다.`
-            : '연결된 메뉴판을 선택하면 메뉴 데이터를 확인할 수 있습니다.'}
-        </p>
         {isMenuBoardDetailLoading ? (
           <p className="empty-note">메뉴판 상세를 불러오는 중입니다.</p>
         ) : menuBoardDetailError ? (
@@ -1363,7 +1842,7 @@ function HomeDashboard({
             ))}
           </div>
         ) : (
-          <p className="empty-note">메뉴가 아직 없습니다. 업로드 후 분석을 시작해보세요.</p>
+          <div className="summary-list" />
         )}
       </section>
 
@@ -1393,15 +1872,19 @@ function MenuCardHeader({ item }) {
   )
 }
 
-function QrBlock({ size = 'default' }) {
+function QrBlock({ menuUrl, onDownloadQr, qrImageUrl, size = 'default' }) {
   return (
     <div className={`qr-block qr-block--${size}`}>
-      <div className="qr-code" aria-label="데모 QR 코드" />
+      {qrImageUrl ? (
+        <img alt={`QR 코드: ${menuUrl || MENU_URL}`} className="qr-code-image" src={qrImageUrl} />
+      ) : (
+        <div className="qr-code" aria-label="QR 코드 준비 중" />
+      )}
       <div className="qr-meta">
         <span>공개 메뉴판 URL</span>
-        <code>{MENU_URL}</code>
+        <code>{menuUrl || MENU_URL}</code>
         {size === 'large' && (
-          <button className="primary-button compact" type="button">
+          <button className="primary-button compact" disabled={!qrImageUrl} type="button" onClick={onDownloadQr}>
             QR 이미지 저장
           </button>
         )}

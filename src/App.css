@@ -401,6 +401,10 @@ input:disabled {
   text-align: center;
 }
 
+.upload-input {
+  display: none;
+}
+
 .upload-dropzone strong {
   margin-top: 12px;
   color: var(--text);
@@ -430,6 +434,12 @@ input:disabled {
   background:
     linear-gradient(135deg, rgba(224, 102, 90, 0.2), rgba(224, 102, 90, 0)),
     var(--gray-bg);
+}
+
+.file-thumbnail--image {
+  background-color: var(--gray-bg);
+  background-position: center;
+  background-size: cover;
 }
 
 .upload-file strong {
@@ -767,7 +777,23 @@ input:disabled {
     repeating-conic-gradient(var(--text) 0% 25%, #fff 0% 50%) 0 / 16px 16px;
 }
 
+.qr-code-image {
+  width: 180px;
+  height: 180px;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+  object-fit: contain;
+  padding: 12px;
+}
+
 .qr-block--large .qr-code {
+  width: 220px;
+  height: 220px;
+}
+
+.qr-block--large .qr-code-image {
   width: 220px;
   height: 220px;
 }

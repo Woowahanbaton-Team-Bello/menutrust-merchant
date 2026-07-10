@@ -32,7 +32,7 @@ export const ALLERGENS = Object.freeze([
   { id: 'pork', label: '돼지고기' },
   { id: 'peach', label: '복숭아' },
   { id: 'tomato', label: '토마토' },
-  { id: 'sulfite', label: '아황산류' },
+  { id: 'sulfites', label: '아황산류' },
   { id: 'walnut', label: '호두' },
   { id: 'chicken', label: '닭고기' },
   { id: 'beef', label: '쇠고기' },
@@ -41,5 +41,5 @@ export const ALLERGENS = Object.freeze([
   { id: 'oyster', label: '굴' },
   { id: 'abalone', label: '전복' },
   { id: 'mussel', label: '홍합' },
-  { id: 'pineNut', label: '잣' },
+  { id: 'pine_nut', label: '잣' },
 ])

@@ -1,3 +1,5 @@
+import { ALLERGENS } from '../domain/allergy.js'
+
 function pickFirstString(values, fallback = '') {
   const match = values.find((value) => typeof value === 'string' && value.trim())
 
@@ -256,6 +258,8 @@ function extractMenus(board) {
   ])
 }
 
+const allergenLabelByCode = new Map(ALLERGENS.map((allergen) => [allergen.id, allergen.label]))
+
 export function getMenuBoardId(board, index = 0) {
   return pickFirstString([board?.id, board?.menuBoardId, board?.menu_board_id], `menu-board-${index}`)
 }
@@ -267,8 +271,10 @@ export function extractMenuBoards(payload) {
 
   const candidates = [
     payload?.data,
+    payload?.data?.stores,
     payload?.data?.menuBoards,
     payload?.data?.items,
+    payload?.stores,
     payload?.menuBoards,
     payload?.items,
     payload?.result?.menuBoards,
@@ -343,6 +349,103 @@ export function extractEditableItems(board) {
       ingredients,
       name: pickFirstString([menu?.name, menu?.menuName, menu?.menu_name], `메뉴 ${index + 1}`),
       price: pickFirstNumber([menu?.price, menu?.amount, menu?.cost], 0),
+      unchecked: ingredients.filter((ingredient) => !ingredient.checked).map((ingredient) => ingredient.name),
+    }
+  })
+}
+
+export function buildEditableItemsFromRelations({
+  allergenRows,
+  ingredientRows,
+  menuItems,
+}) {
+  const ingredientsByMenuItemId = new Map()
+  const allergensByMenuItemId = new Map()
+
+  ingredientRows
+    .slice()
+    .sort((left, right) => (left.sort_order || 0) - (right.sort_order || 0))
+    .forEach((ingredient) => {
+      const normalizedIngredient = normalizeIngredient({
+        checked: ingredient.included,
+        name: ingredient.name_ko,
+      })
+
+      if (!normalizedIngredient) {
+        return
+      }
+
+      const current = ingredientsByMenuItemId.get(ingredient.menu_item_id) || []
+      current.push(normalizedIngredient)
+      ingredientsByMenuItemId.set(ingredient.menu_item_id, current)
+    })
+
+  allergenRows.forEach((allergen) => {
+    const name = allergenLabelByCode.get(allergen.allergen_code) || allergen.allergen_code
+    const normalizedAllergen = normalizeAllergen({
+      name,
+      reason: allergen.reason,
+      status: allergen.presence_status,
+    })
+
+    if (!normalizedAllergen) {
+      return
+    }
+
+    const current = allergensByMenuItemId.get(allergen.menu_item_id) || []
+    current.push(normalizedAllergen)
+    allergensByMenuItemId.set(allergen.menu_item_id, current)
+  })
+
+  return menuItems
+    .slice()
+    .sort((left, right) => (left.sort_order || 0) - (right.sort_order || 0))
+    .map((menuItem, index) => {
+      const ingredients = ingredientsByMenuItemId.get(menuItem.id) || []
+
+      return {
+        allergenDraft: '',
+        allergens: allergensByMenuItemId.get(menuItem.id) || [],
+        category: pickFirstString([menuItem.category], '기타'),
+        draft: '',
+        id: menuItem.id || `menu-${index}`,
+        ingredients,
+        name: pickFirstString([menuItem.name_ko, menuItem.name], `메뉴 ${index + 1}`),
+        price: pickFirstNumber([menuItem.price_krw, menuItem.price], 0),
+        unchecked: ingredients.filter((ingredient) => !ingredient.checked).map((ingredient) => ingredient.name),
+      }
+    })
+}
+
+export function buildEditableItemsFromApiMenuItems(menuItems) {
+  return (menuItems || []).map((menuItem, index) => {
+    const ingredients = (menuItem.ingredients || []).map((ingredient, ingredientIndex) => ({
+      id: pickFirstString([ingredient.id], ''),
+      checked: ingredient.included !== false,
+      name: pickFirstString([ingredient.nameKo, ingredient.name_ko, ingredient.name], ''),
+      reviewStatus: pickFirstString([ingredient.reviewStatus, ingredient.review_status], ''),
+      sortOrder: pickFirstNumber([ingredient.sortOrder, ingredient.sort_order], ingredientIndex + 1),
+    })).filter((ingredient) => ingredient.name)
+
+    const allergens = (menuItem.allergens || []).map((allergen) => ({
+      code: pickFirstString([allergen.code], ''),
+      id: pickFirstString([allergen.id], ''),
+      name: pickFirstString([allergen.labelKo, allergen.label_ko, allergen.name, allergen.code], ''),
+      reason: pickFirstString([allergen.reason], ''),
+      reviewStatus: pickFirstString([allergen.reviewStatus, allergen.review_status], ''),
+      sourceIngredientNames: extractArray([allergen.sourceIngredientNames, allergen.source_ingredient_names]),
+      status: normalizeAllergenStatus(pickFirstString([allergen.status], 'confirmed')),
+    })).filter((allergen) => allergen.name && allergen.status)
+
+    return {
+      allergenDraft: '',
+      allergens,
+      category: pickFirstString([menuItem.category], '기타'),
+      draft: '',
+      id: pickFirstString([menuItem.id], `menu-${index}`),
+      ingredients,
+      name: pickFirstString([menuItem.nameKo, menuItem.name_ko, menuItem.name], `메뉴 ${index + 1}`),
+      price: pickFirstNumber([menuItem.priceKrw, menuItem.price_krw, menuItem.price], 0),
       unchecked: ingredients.filter((ingredient) => !ingredient.checked).map((ingredient) => ingredient.name),
     }
   })
