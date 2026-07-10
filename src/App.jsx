@@ -14,8 +14,16 @@ import {
 } from 'lucide-react'
 import './App.css'
 import { ALLERGENS } from './domain/allergy.js'
-import { RAW_MENU, STEP_LABELS } from './domain/merchantDemo.js'
+import { STEP_LABELS } from './domain/merchantDemo.js'
+import { apiFetch } from './lib/api.js'
 import { env } from './lib/env.js'
+import {
+  extractEditableItems,
+  extractMenuBoardDetail,
+  extractMenuBoards,
+  getMenuBoardId,
+  summarizeMenuBoard,
+} from './lib/menuBoards.js'
 import { supabase } from './lib/supabase.js'
 
 const APP_NAME = '두입세입'
@@ -27,21 +35,13 @@ const EMPTY_AUTH_FORM = {
   storeName: '',
   confirmPassword: '',
 }
+const MENU_BOARD_DETAIL_PATHS = [
+  (menuBoardId) => `/menu-boards/${menuBoardId}`,
+  (menuBoardId) => `/menu-board/${menuBoardId}`,
+  (menuBoardId) => `/menu-boards/me/${menuBoardId}`,
+]
 
 const allergenOptions = ALLERGENS.map((allergen) => allergen.label)
-
-function createInitialItems() {
-  return RAW_MENU.map((menu) => ({
-    ...menu,
-    ingredients: menu.ingredients.map((name) => ({
-      name,
-      checked: !menu.unchecked.includes(name),
-    })),
-    allergens: menu.allergens.map((allergen) => ({ ...allergen })),
-    draft: '',
-    allergenDraft: allergenOptions[0],
-  }))
-}
 
 function formatPrice(price) {
   return `${Number(price).toLocaleString('ko-KR')}원`
@@ -88,7 +88,7 @@ function getAuthErrorMessage(error) {
 function App() {
   const [phase, setPhase] = useState('login')
   const [step, setStep] = useState(1)
-  const [items, setItems] = useState(createInitialItems)
+  const [items, setItems] = useState([])
   const [auth, setAuth] = useState(EMPTY_AUTH_FORM)
   const [newMenu, setNewMenu] = useState({ name: '', price: '', category: '' })
   const [user, setUser] = useState(null)
@@ -98,11 +98,25 @@ function App() {
   const [isAuthReady, setIsAuthReady] = useState(false)
   const [isAuthSubmitting, setIsAuthSubmitting] = useState(false)
   const [isLogoutPending, setIsLogoutPending] = useState(false)
+  const [menuBoards, setMenuBoards] = useState([])
+  const [isMenuBoardsLoading, setIsMenuBoardsLoading] = useState(false)
+  const [menuBoardsError, setMenuBoardsError] = useState('')
+  const [selectedMenuBoardId, setSelectedMenuBoardId] = useState('')
+  const [isMenuBoardDetailLoading, setIsMenuBoardDetailLoading] = useState(false)
+  const [menuBoardDetailError, setMenuBoardDetailError] = useState('')
 
   const itemCount = items.length
   const currentStep = useMemo(
     () => STEP_LABELS.find((item) => item.id === step),
     [step],
+  )
+  const menuBoardSummaries = useMemo(
+    () => menuBoards.map((board, index) => summarizeMenuBoard(board, index)),
+    [menuBoards],
+  )
+  const selectedMenuBoardSummary = useMemo(
+    () => menuBoardSummaries.find((board) => board.id === selectedMenuBoardId) || menuBoardSummaries[0] || null,
+    [menuBoardSummaries, selectedMenuBoardId],
   )
   const storeName = useMemo(() => getUserStoreName(user), [user])
 
@@ -156,6 +170,144 @@ function App() {
       subscription.unsubscribe()
     }
   }, [])
+
+  useEffect(() => {
+    let isMounted = true
+
+    async function loadMenuBoards() {
+      if (!user) {
+        setMenuBoards([])
+        setMenuBoardsError('')
+        setIsMenuBoardsLoading(false)
+        setSelectedMenuBoardId('')
+        setMenuBoardDetailError('')
+        setItems([])
+        return
+      }
+
+      setIsMenuBoardsLoading(true)
+      setMenuBoardsError('')
+
+      try {
+        const response = await apiFetch('/menu-boards/me')
+        const payload = await response.json().catch(() => null)
+
+        if (!response.ok) {
+          const errorMessage = payload?.error?.message || '메뉴판 목록을 불러오지 못했습니다.'
+          throw new Error(errorMessage)
+        }
+
+        if (!isMounted) return
+
+        const nextMenuBoards = extractMenuBoards(payload)
+
+        setMenuBoards(nextMenuBoards)
+        setSelectedMenuBoardId((current) => (
+          nextMenuBoards.some((board, index) => getMenuBoardId(board, index) === current)
+            ? current
+            : (nextMenuBoards[0] ? getMenuBoardId(nextMenuBoards[0], 0) : '')
+        ))
+        setPhase(nextMenuBoards.length > 0 ? 'home' : 'flow')
+      } catch (error) {
+        if (!isMounted) return
+
+        setMenuBoards([])
+        setSelectedMenuBoardId('')
+        setMenuBoardsError(
+          error instanceof Error ? error.message : '메뉴판 목록을 불러오지 못했습니다.',
+        )
+        setItems([])
+        setPhase('flow')
+      } finally {
+        if (isMounted) {
+          setIsMenuBoardsLoading(false)
+        }
+      }
+    }
+
+    loadMenuBoards()
+
+    return () => {
+      isMounted = false
+    }
+  }, [user])
+
+  useEffect(() => {
+    let isMounted = true
+
+    async function loadMenuBoardDetail() {
+      if (!user || !selectedMenuBoardId) {
+        setMenuBoardDetailError('')
+        setIsMenuBoardDetailLoading(false)
+        setItems([])
+        return
+      }
+
+      const fallbackBoard =
+        menuBoards.find((board, index) => getMenuBoardId(board, index) === selectedMenuBoardId) || null
+
+      setIsMenuBoardDetailLoading(true)
+      setMenuBoardDetailError('')
+
+      try {
+        let detail = null
+        let lastError = null
+
+        for (const createPath of MENU_BOARD_DETAIL_PATHS) {
+          const response = await apiFetch(createPath(selectedMenuBoardId))
+          const payload = await response.json().catch(() => null)
+
+          if (response.ok) {
+            detail = extractMenuBoardDetail(payload)
+            break
+          }
+
+          if (response.status === 404) {
+            continue
+          }
+
+          lastError = new Error(
+            payload?.error?.message || '메뉴판 상세 정보를 불러오지 못했습니다.',
+          )
+          break
+        }
+
+        if (!detail && fallbackBoard) {
+          detail = fallbackBoard
+        }
+
+        if (!detail) {
+          throw lastError || new Error('메뉴판 상세 정보를 불러오지 못했습니다.')
+        }
+
+        if (!isMounted) return
+
+        const nextItems = extractEditableItems(detail).map((item) => ({
+          ...item,
+          allergenDraft: item.allergenDraft || allergenOptions[0],
+        }))
+
+        setItems(nextItems)
+      } catch (error) {
+        if (!isMounted) return
+
+        setItems([])
+        setMenuBoardDetailError(
+          error instanceof Error ? error.message : '메뉴판 상세 정보를 불러오지 못했습니다.',
+        )
+      } finally {
+        if (isMounted) {
+          setIsMenuBoardDetailLoading(false)
+        }
+      }
+    }
+
+    loadMenuBoardDetail()
+
+    return () => {
+      isMounted = false
+    }
+  }, [menuBoards, selectedMenuBoardId, user])
 
   function beginFlow() {
     setAppError('')
@@ -329,7 +481,12 @@ function App() {
       <Sidebar
         appError={appError}
         itemCount={itemCount}
+        isMenuBoardDetailLoading={isMenuBoardDetailLoading}
         isLogoutPending={isLogoutPending}
+        isMenuBoardsLoading={isMenuBoardsLoading}
+        menuBoardCount={menuBoards.length}
+        menuBoardDetailError={menuBoardDetailError}
+        menuBoardsError={menuBoardsError}
         phase={phase}
         step={step}
         storeName={storeName}
@@ -346,12 +503,20 @@ function App() {
         {phase === 'home' ? (
           <HomeDashboard
             itemCount={itemCount}
+            menuBoardDetailError={menuBoardDetailError}
+            selectedMenuBoardId={selectedMenuBoardId}
+            selectedMenuBoardSummary={selectedMenuBoardSummary}
+            menuBoardSummaries={menuBoardSummaries}
+            menuBoardsError={menuBoardsError}
             items={items}
+            isMenuBoardDetailLoading={isMenuBoardDetailLoading}
+            isMenuBoardsLoading={isMenuBoardsLoading}
             storeName={storeName}
+            onBoardSelect={setSelectedMenuBoardId}
             onEditMenu={() => {
               setAppError('')
               setPhase('flow')
-              setStep(3)
+              setStep(itemCount > 0 ? 3 : 1)
             }}
             onRepublish={() => {
               setAppError('')
@@ -361,9 +526,12 @@ function App() {
           />
         ) : (
           <FlowScreen
+            boardDetailError={menuBoardDetailError}
+            boardTitle={selectedMenuBoardSummary?.title || ''}
             currentStep={currentStep}
             itemCount={itemCount}
             items={items}
+            isBoardDetailLoading={isMenuBoardDetailLoading}
             newMenu={newMenu}
             step={step}
             onAddAllergen={(itemIndex) => {
@@ -556,7 +724,12 @@ function AuthLoadingScreen() {
 function Sidebar({
   appError,
   itemCount,
+  isMenuBoardDetailLoading,
   isLogoutPending,
+  isMenuBoardsLoading,
+  menuBoardCount,
+  menuBoardDetailError,
+  menuBoardsError,
   phase,
   step,
   storeName,
@@ -592,8 +765,18 @@ function Sidebar({
 
       <div className="sidebar-footer">
         <p>
-          {userEmail ? `${userEmail} 계정으로 로그인됨 · 현재 메뉴 데이터는 데모 ${itemCount}개입니다.` : `${storeName} 메뉴 ${itemCount}개 기준 데모입니다.`}
+          {userEmail
+            ? `${userEmail} 계정으로 로그인됨 · ${
+                isMenuBoardsLoading
+                  ? '메뉴판 목록 확인 중'
+                  : isMenuBoardDetailLoading
+                    ? '메뉴판 상세 확인 중'
+                    : `연결된 메뉴판 ${menuBoardCount}개 · 현재 메뉴 ${itemCount}개`
+              }`
+            : `${storeName} 메뉴 ${itemCount}개 기준 데모입니다.`}
         </p>
+        {menuBoardsError ? <p className="sidebar-feedback">{menuBoardsError}</p> : null}
+        {menuBoardDetailError ? <p className="sidebar-feedback">{menuBoardDetailError}</p> : null}
         {appError ? <p className="sidebar-feedback">{appError}</p> : null}
         <button className="logout-button" disabled={isLogoutPending} type="button" onClick={onLogout}>
           <LogOut size={15} />
@@ -606,9 +789,12 @@ function Sidebar({
 
 function FlowScreen(props) {
   const {
+    boardDetailError,
+    boardTitle,
     currentStep,
     itemCount,
     items,
+    isBoardDetailLoading,
     newMenu,
     step,
     onAddAllergen,
@@ -631,6 +817,9 @@ function FlowScreen(props) {
         <div>
           <p className="section-kicker">Step {step}</p>
           <h1 id="flow-title">{currentStep.label}</h1>
+          {boardTitle ? <p className="workspace-note">현재 편집 메뉴판: {boardTitle}</p> : null}
+          {isBoardDetailLoading ? <p className="workspace-note">메뉴판 상세 데이터를 불러오는 중입니다.</p> : null}
+          {boardDetailError ? <p className="workspace-note workspace-note--error">{boardDetailError}</p> : null}
         </div>
         <span className="progress-pill">{itemCount}개 메뉴</span>
       </div>
@@ -963,7 +1152,21 @@ function QrStep({ onViewHome }) {
   )
 }
 
-function HomeDashboard({ itemCount, items, onEditMenu, onRepublish, storeName }) {
+function HomeDashboard({
+  itemCount,
+  items,
+  isMenuBoardDetailLoading,
+  isMenuBoardsLoading,
+  menuBoardDetailError,
+  onBoardSelect,
+  menuBoardsError,
+  menuBoardSummaries,
+  onEditMenu,
+  onRepublish,
+  selectedMenuBoardId,
+  selectedMenuBoardSummary,
+  storeName,
+}) {
   return (
     <section className="home-dashboard" aria-labelledby="home-title">
       <div className="workspace-header">
@@ -975,6 +1178,38 @@ function HomeDashboard({ itemCount, items, onEditMenu, onRepublish, storeName })
           <p>메뉴 {itemCount}개 · 소비자 공개 메뉴판이 QR로 연결되어 있어요.</p>
         </div>
       </div>
+
+      <section className="linked-boards" aria-labelledby="linked-boards-title">
+        <div className="summary-heading">
+          <h2 id="linked-boards-title">연결된 메뉴판</h2>
+        </div>
+        {isMenuBoardsLoading ? (
+          <p className="empty-note">메뉴판 목록을 불러오는 중입니다.</p>
+        ) : menuBoardsError ? (
+          <p className="empty-note">{menuBoardsError}</p>
+        ) : menuBoardSummaries.length > 0 ? (
+          <div className="summary-list">
+            {menuBoardSummaries.map((board) => (
+              <button
+                className={`summary-row summary-row--button ${selectedMenuBoardId === board.id ? 'summary-row--active' : ''}`}
+                key={board.id}
+                type="button"
+                onClick={() => onBoardSelect(board.id)}
+              >
+                <div>
+                  <strong>{board.title}</strong>
+                  <span>{board.meta}</span>
+                </div>
+                <div className="summary-badges">
+                  <span className="live-badge">{board.statusLabel}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-note">아직 연결된 메뉴판이 없습니다. 첫 메뉴판을 업로드해 발행해보세요.</p>
+        )}
+      </section>
 
       <div className="home-qr-section">
         <QrBlock />
@@ -990,30 +1225,43 @@ function HomeDashboard({ itemCount, items, onEditMenu, onRepublish, storeName })
             메뉴판 수정하기
           </button>
         </div>
-        <div className="summary-list">
-          {items.map((item) => (
-            <article className="summary-row" key={item.name}>
-              <div>
-                <strong>{item.name}</strong>
-                <span>{item.category} · {formatPrice(item.price)}</span>
-              </div>
-              <div className="summary-badges">
-                {item.allergens.length > 0 ? (
-                  item.allergens.slice(0, 4).map((allergen) => (
-                    <span
-                      className={`status-badge status-badge--${allergen.status}`}
-                      key={allergen.name}
-                    >
-                      {allergen.name}
-                    </span>
-                  ))
-                ) : (
-                  <span className="muted-label">알레르겐 없음</span>
-                )}
-              </div>
-            </article>
-          ))}
-        </div>
+        <p className="summary-note">
+          {selectedMenuBoardSummary
+            ? `${selectedMenuBoardSummary.title}의 메뉴 데이터를 보여주고 있습니다.`
+            : '연결된 메뉴판을 선택하면 메뉴 데이터를 확인할 수 있습니다.'}
+        </p>
+        {isMenuBoardDetailLoading ? (
+          <p className="empty-note">메뉴판 상세를 불러오는 중입니다.</p>
+        ) : menuBoardDetailError ? (
+          <p className="empty-note">{menuBoardDetailError}</p>
+        ) : items.length > 0 ? (
+          <div className="summary-list">
+            {items.map((item) => (
+              <article className="summary-row" key={item.id || item.name}>
+                <div>
+                  <strong>{item.name}</strong>
+                  <span>{item.category} · {formatPrice(item.price)}</span>
+                </div>
+                <div className="summary-badges">
+                  {item.allergens.length > 0 ? (
+                    item.allergens.slice(0, 4).map((allergen) => (
+                      <span
+                        className={`status-badge status-badge--${allergen.status}`}
+                        key={`${item.id || item.name}-${allergen.name}`}
+                      >
+                        {allergen.name}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="muted-label">알레르겐 없음</span>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-note">메뉴가 아직 없습니다. 업로드 후 분석을 시작해보세요.</p>
+        )}
       </section>
 
       <div className="republish-callout">
