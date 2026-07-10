@@ -208,6 +208,8 @@ function App() {
   const [menuBoardRefreshKey, setMenuBoardRefreshKey] = useState(0)
   const [publishedMenu, setPublishedMenu] = useState(null)
   const [qrImageUrl, setQrImageUrl] = useState('')
+  const [isFlowPinned, setIsFlowPinned] = useState(false)
+  const [shouldResolvePostLoginRoute, setShouldResolvePostLoginRoute] = useState(false)
 
   const itemCount = items.length
   const currentStep = useMemo(
@@ -258,6 +260,7 @@ function App() {
 
       const sessionUser = data.session?.user ?? null
       setUser(sessionUser)
+      setShouldResolvePostLoginRoute(Boolean(sessionUser))
       setPhase(sessionUser ? 'flow' : 'login')
       setIsAuthReady(true)
     }
@@ -277,10 +280,12 @@ function App() {
         setAppError('')
         setAuthError('')
         setAuthNotice('')
+        setShouldResolvePostLoginRoute(true)
         setPhase((current) => (current === 'home' || current === 'flow' ? current : 'flow'))
         return
       }
 
+      setShouldResolvePostLoginRoute(false)
       setStep(1)
       setPhase('login')
     })
@@ -347,6 +352,10 @@ function App() {
         setSelectedMenuBoardId('')
         setSelectedMenuBoardTitle('')
         setMenuBoardDetailError('')
+        setPublishedMenu(null)
+        setQrImageUrl('')
+        setIsFlowPinned(false)
+        setShouldResolvePostLoginRoute(false)
         setItems([])
         return
       }
@@ -381,18 +390,9 @@ function App() {
           setSelectedMenuBoardId(readStoredMenuBoardId(nextStoreId))
           return nextStoreId
         })
-        if (
-          nextMenuBoards.length > 0
-          && phase === 'flow'
-          && step === 1
-          && !uploadedImage?.file
-          && !isUploadSubmitting
-          && !isAllergenSaving
-          && !isPublishing
-        ) {
-          setPhase('home')
-        } else if (nextMenuBoards.length === 0) {
+        if (nextMenuBoards.length === 0) {
           setPhase('flow')
+          setShouldResolvePostLoginRoute(false)
         }
       } catch (error) {
         if (!isMounted) return
@@ -418,18 +418,7 @@ function App() {
     return () => {
       isMounted = false
     }
-  }, [
-    isAllergenSaving,
-    isPublishing,
-    isStoreRegistrationLoading,
-    isUploadSubmitting,
-    menuBoardRefreshKey,
-    pendingStoreRegistration,
-    phase,
-    step,
-    uploadedImage,
-    user,
-  ])
+  }, [isStoreRegistrationLoading, menuBoardRefreshKey, pendingStoreRegistration, user])
 
   useEffect(() => {
     let isMounted = true
@@ -447,6 +436,21 @@ function App() {
       setMenuBoardDetailError('')
 
       try {
+        const { data: publishedMenuRow, error: publishedMenuError } = await supabase
+          .from('public_menus')
+          .select('menu_board_id')
+          .eq('store_id', selectedStoreId)
+          .eq('status', 'published')
+          .maybeSingle()
+
+        if (publishedMenuError) {
+          throw publishedMenuError
+        }
+
+        const publishedBoardId = publishedMenuRow?.menu_board_id || ''
+
+        if (!isMounted) return
+
         const candidateBoardIds = [
           selectedMenuBoardId,
           readStoredMenuBoardId(selectedStoreId),
@@ -467,19 +471,8 @@ function App() {
 
         if (!detail) {
           // Prefer the published board shown on the dashboard. If none exists, fall back to the latest draft.
-          const { data: publishedMenu, error: publishedMenuError } = await supabase
-            .from('public_menus')
-            .select('menu_board_id')
-            .eq('store_id', selectedStoreId)
-            .eq('status', 'published')
-            .maybeSingle()
-
-          if (publishedMenuError) {
-            throw publishedMenuError
-          }
-
-          if (publishedMenu?.menu_board_id) {
-            nextMenuBoardId = publishedMenu.menu_board_id
+          if (publishedBoardId) {
+            nextMenuBoardId = publishedBoardId
           } else {
             // `owner/me` currently returns stores only, so resolve the latest board id as a fallback.
             const { data: menuBoardRows, error: menuBoardLookupError } = await supabase
@@ -523,13 +516,19 @@ function App() {
         setItems(nextItems)
 
         if (
-          detail.menuBoard?.id
-          && phase === 'flow'
-          && step === 1
+          publishedBoardId
+          && detail.menuBoard?.id
+          && shouldResolvePostLoginRoute
+          && !isFlowPinned
           && !uploadedImage?.file
           && !isUploadSubmitting
+          && !isAllergenSaving
+          && !isPublishing
         ) {
           setPhase('home')
+          setShouldResolvePostLoginRoute(false)
+        } else if (shouldResolvePostLoginRoute) {
+          setShouldResolvePostLoginRoute(false)
         }
       } catch (error) {
         if (!isMounted) return
@@ -551,12 +550,42 @@ function App() {
     return () => {
       isMounted = false
     }
-  }, [isUploadSubmitting, menuBoardRefreshKey, phase, selectedMenuBoardId, selectedStoreId, step, uploadedImage, user])
+  }, [
+    isAllergenSaving,
+    isFlowPinned,
+    isPublishing,
+    isUploadSubmitting,
+    menuBoardRefreshKey,
+    phase,
+    selectedMenuBoardId,
+    selectedStoreId,
+    shouldResolvePostLoginRoute,
+    step,
+    uploadedImage,
+    user,
+  ])
 
-  function beginFlow() {
+  function openFlowStep(nextStep, options = {}) {
+    const { pin = false } = options
+
     setAppError('')
     setPhase('flow')
-    setStep(1)
+    setStep(nextStep)
+    setShouldResolvePostLoginRoute(false)
+
+    if (pin) {
+      setIsFlowPinned(true)
+    }
+  }
+
+  function showHomeDashboard() {
+    setIsFlowPinned(false)
+    setShouldResolvePostLoginRoute(false)
+    setPhase('home')
+  }
+
+  function beginFlow() {
+    openFlowStep(1)
   }
 
   function handleStoreSelect(storeId) {
@@ -965,6 +994,10 @@ function App() {
       }
 
       setUser(null)
+      setPublishedMenu(null)
+      setQrImageUrl('')
+      setIsFlowPinned(false)
+      setShouldResolvePostLoginRoute(false)
       setPhase('login')
       setStep(1)
       setAuth(EMPTY_AUTH_FORM)
@@ -1041,9 +1074,7 @@ function App() {
         storeName={storeName}
         onLogout={logout}
         onStepChange={(nextStep) => {
-          setAppError('')
-          setPhase('flow')
-          setStep(nextStep)
+          openFlowStep(nextStep, { pin: true })
         }}
       />
 
@@ -1064,14 +1095,10 @@ function App() {
             onBoardSelect={handleStoreSelect}
             onDownloadQr={handleQrDownload}
             onEditMenu={() => {
-              setAppError('')
-              setPhase('flow')
-              setStep(itemCount > 0 ? 3 : 1)
+              openFlowStep(itemCount > 0 ? 3 : 1, { pin: true })
             }}
             onRepublish={() => {
-              setAppError('')
-              setPhase('flow')
-              setStep(6)
+              openFlowStep(6, { pin: true })
             }}
           />
         ) : (
@@ -1167,7 +1194,7 @@ function App() {
             onUploadStart={handleUploadStart}
             onPublishStart={handlePublishStart}
             onQrDownload={handleQrDownload}
-            onViewHome={() => setPhase('home')}
+            onViewHome={showHomeDashboard}
           />
         )}
       </main>
