@@ -40,7 +40,6 @@ import { supabase } from './lib/supabase.js'
 
 const APP_NAME = '두입세입'
 const DEMO_STORE_NAME = '우아타이'
-const MENU_URL = env.appBaseUrl || 'menutrust-demo.vercel.app/m/wooa-thai'
 const EMPTY_AUTH_FORM = {
   email: '',
   password: '',
@@ -79,6 +78,23 @@ function getUserStoreName(user) {
   return typeof storeName === 'string' && storeName.trim()
     ? storeName.trim()
     : DEMO_STORE_NAME
+}
+
+function resolvePublicMenuUrl(publicMenu) {
+  const explicitUrl = typeof publicMenu?.publicUrl === 'string' ? publicMenu.publicUrl.trim() : ''
+
+  if (explicitUrl) {
+    return explicitUrl
+  }
+
+  const slug = typeof publicMenu?.slug === 'string' ? publicMenu.slug.trim() : ''
+  const baseUrl = typeof env.appBaseUrl === 'string' ? env.appBaseUrl.trim().replace(/\/$/, '') : ''
+
+  if (baseUrl && slug) {
+    return `${baseUrl}/m/${slug}`
+  }
+
+  return ''
 }
 
 function getAuthErrorMessage(error) {
@@ -225,6 +241,7 @@ function App() {
     [menuBoardSummaries, selectedStoreId],
   )
   const storeName = useMemo(() => getUserStoreName(user), [user])
+  const menuUrl = useMemo(() => resolvePublicMenuUrl(publishedMenu), [publishedMenu])
 
   function updateItem(index, updater) {
     setItems((current) => current.map((item, i) => (i === index ? updater(item) : item)))
@@ -237,6 +254,35 @@ function App() {
       }
     }
   }, [uploadedImage])
+
+  useEffect(() => {
+    let isMounted = true
+
+    async function syncPublishedQrImage() {
+      if (!menuUrl) {
+        setQrImageUrl('')
+        return
+      }
+
+      try {
+        const nextQrImageUrl = await createQrImage(menuUrl)
+
+        if (!isMounted) return
+
+        setQrImageUrl((current) => (current === nextQrImageUrl ? current : nextQrImageUrl))
+      } catch {
+        if (!isMounted) return
+
+        setQrImageUrl('')
+      }
+    }
+
+    syncPublishedQrImage()
+
+    return () => {
+      isMounted = false
+    }
+  }, [menuUrl])
 
   useEffect(() => {
     if (!selectedStoreId || !selectedMenuBoardId) {
@@ -438,7 +484,7 @@ function App() {
       try {
         const { data: publishedMenuRow, error: publishedMenuError } = await supabase
           .from('public_menus')
-          .select('menu_board_id')
+          .select('menu_board_id, public_url, slug, status')
           .eq('store_id', selectedStoreId)
           .eq('status', 'published')
           .maybeSingle()
@@ -450,6 +496,17 @@ function App() {
         const publishedBoardId = publishedMenuRow?.menu_board_id || ''
 
         if (!isMounted) return
+
+        setPublishedMenu(
+          publishedMenuRow
+            ? {
+                menuBoardId: publishedMenuRow.menu_board_id,
+                publicUrl: publishedMenuRow.public_url,
+                slug: publishedMenuRow.slug,
+                status: publishedMenuRow.status,
+              }
+            : null,
+        )
 
         const candidateBoardIds = [
           selectedMenuBoardId,
@@ -1083,7 +1140,7 @@ function App() {
           <HomeDashboard
             itemCount={itemCount}
             menuBoardDetailError={menuBoardDetailError}
-            menuUrl={publishedMenu?.publicUrl || MENU_URL}
+            menuUrl={menuUrl}
             selectedStoreId={selectedStoreId}
             menuBoardSummaries={menuBoardSummaries}
             menuBoardsError={menuBoardsError}
@@ -1113,7 +1170,7 @@ function App() {
             isPublishing={isPublishing}
             isStepResultSubmitting={isStepResultSubmitting}
             isUploadSubmitting={isUploadSubmitting}
-            menuUrl={publishedMenu?.publicUrl || MENU_URL}
+            menuUrl={menuUrl}
             newMenu={newMenu}
             qrImageUrl={qrImageUrl}
             step={step}
@@ -1903,13 +1960,13 @@ function QrBlock({ menuUrl, onDownloadQr, qrImageUrl, size = 'default' }) {
   return (
     <div className={`qr-block qr-block--${size}`}>
       {qrImageUrl ? (
-        <img alt={`QR 코드: ${menuUrl || MENU_URL}`} className="qr-code-image" src={qrImageUrl} />
+        <img alt={`QR 코드: ${menuUrl}`} className="qr-code-image" src={qrImageUrl} />
       ) : (
         <div className="qr-code" aria-label="QR 코드 준비 중" />
       )}
       <div className="qr-meta">
         <span>공개 메뉴판 URL</span>
-        <code>{menuUrl || MENU_URL}</code>
+        <code>{menuUrl || '발행 후 URL이 생성됩니다.'}</code>
         {size === 'large' && (
           <button className="primary-button compact" disabled={!qrImageUrl} type="button" onClick={onDownloadQr}>
             QR 이미지 저장
