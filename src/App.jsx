@@ -21,6 +21,7 @@ import {
   apiFetch,
   createMenuBoard,
   fetchMenuBoardDetail,
+  fetchMenuBoardPublication,
   markBoardAllergenReview,
   markMenuBoardImageUploaded,
   publishMenuBoard,
@@ -521,7 +522,29 @@ function App() {
 
         if (!isMounted) return
 
-        setPublishedMenu(normalizePublishedMenu(publishedMenuRow))
+        if (publishedBoardId) {
+          // The `public_menus` table only stores a storage bucket/path for the
+          // QR image, not a browsable URL — only the API signs one on demand.
+          // A direct table read (above) can never yield a usable qrImageUrl.
+          try {
+            const publication = await fetchMenuBoardPublication(publishedBoardId)
+            const publicationPublicMenu = publication?.publicMenu || publication
+
+            if (!isMounted) return
+
+            setPublishedMenu(
+              publicationPublicMenu
+                ? normalizePublishedMenu(publicationPublicMenu)
+                : normalizePublishedMenu(publishedMenuRow),
+            )
+          } catch {
+            if (!isMounted) return
+
+            setPublishedMenu(normalizePublishedMenu(publishedMenuRow))
+          }
+        } else {
+          setPublishedMenu(null)
+        }
 
         const candidateBoardIds = [
           selectedMenuBoardId,
@@ -938,16 +961,14 @@ function App() {
         setQrImageUrl(existingQrImageUrl)
       } else {
         // Show the freshly generated QR right away so publishing always ends
-        // with a visible QR, even if the backend save below fails or the
-        // guessed save endpoint doesn't exist. It gets replaced by the
-        // backend-confirmed copy as soon as that's available.
+        // with a visible QR, even if the backend save below fails. It gets
+        // replaced by the backend-confirmed signed URL as soon as that's available.
         const generatedQrImageUrl = await createQrImage(nextMenuUrl)
         setQrImageUrl(generatedQrImageUrl)
 
         try {
           const savedQrResult = await savePublishedQrImage({
             menuBoardId: selectedMenuBoardId,
-            menuUrl: nextMenuUrl,
             qrImageDataUrl: generatedQrImageUrl,
           })
 

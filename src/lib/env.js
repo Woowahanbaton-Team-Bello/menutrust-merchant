@@ -12,7 +12,6 @@ Object.entries(requiredClientEnv).forEach(([key, value]) => {
 export const env = {
   apiBaseUrl: import.meta.env.VITE_API_BASE_URL || '',
   appBaseUrl: import.meta.env.VITE_APP_BASE_URL || '',
-  qrImageSavePath: import.meta.env.VITE_QR_IMAGE_SAVE_PATH || '',
   storeRegistrationNameField: import.meta.env.VITE_STORE_REGISTRATION_NAME_FIELD || 'storeName',
   storeRegistrationPath: import.meta.env.VITE_STORE_REGISTRATION_PATH || '',
   supabaseAnonKey: requiredClientEnv.supabaseAnonKey,

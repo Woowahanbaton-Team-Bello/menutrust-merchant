@@ -61,21 +61,6 @@ async function readApiResponse(response, fallbackMessage) {
   return payload?.data ?? payload
 }
 
-function interpolateApiPath(template, values) {
-  return template.replace(/:([a-zA-Z0-9_]+)/g, (_match, key) => values[key] ?? '')
-}
-
-function buildQrImagePayload({ menuUrl, qrImageDataUrl }) {
-  return {
-    dataUrl: qrImageDataUrl,
-    imageDataUrl: qrImageDataUrl,
-    menuUrl,
-    publicUrl: menuUrl,
-    qrImageDataUrl,
-    qrImageUrl: qrImageDataUrl,
-  }
-}
-
 export async function createMenuBoard({ contentType, fileName, storeId, title = '메뉴판' }) {
   const response = await apiFetch(`/stores/${storeId}/menu-boards`, {
     body: JSON.stringify({
@@ -193,42 +178,29 @@ export async function publishMenuBoard({ menuBoardId, publicBaseUrl }) {
   return readApiResponse(response, '메뉴판을 발행하지 못했습니다.')
 }
 
-export async function savePublishedQrImage({ menuBoardId, menuUrl, qrImageDataUrl }) {
-  const customPath = env.qrImageSavePath
-    ? interpolateApiPath(env.qrImageSavePath, { menuBoardId })
-    : ''
+// Matches the backend's actual route: POST /menu-boards/:menuBoardId/qr-image
+// (see handleQrImageUpload), which only accepts { imageDataUrl } as
+// "data:image/png;base64,..." and requires the board to already be published.
+export async function savePublishedQrImage({ menuBoardId, qrImageDataUrl }) {
+  const response = await apiFetch(`/menu-boards/${menuBoardId}/qr-image`, {
+    body: JSON.stringify({ imageDataUrl: qrImageDataUrl }),
+    method: 'POST',
+  })
 
-  const candidatePaths = [
-    customPath,
-    `/menu-boards/${menuBoardId}/qr-image`,
-    `/menu-boards/${menuBoardId}/qr`,
-    `/menu-boards/${menuBoardId}/publications/qr-image`,
-    `/menu-boards/${menuBoardId}/publications/qr`,
-  ].filter(Boolean)
+  return readApiResponse(response, 'QR 이미지를 저장하지 못했습니다.')
+}
 
-  const payload = buildQrImagePayload({ menuUrl, qrImageDataUrl })
-  let lastError = null
+// Matches GET /menu-boards/:menuBoardId/publication (handlePublicationDetail).
+// This is the only source of a browsable QR image URL: the DB only stores a
+// storage bucket/path, and the Edge Function signs a temporary URL for it on
+// each call. A direct Supabase table read of `public_menus` can never return
+// a usable QR image URL.
+export async function fetchMenuBoardPublication(menuBoardId) {
+  const response = await apiFetch(`/menu-boards/${menuBoardId}/publication`)
 
-  for (const path of candidatePaths) {
-    for (const method of ['PATCH', 'POST']) {
-      const response = await apiFetch(path, {
-        body: JSON.stringify(payload),
-        method,
-      })
-
-      if (response.ok) {
-        return readApiResponse(response, 'QR 이미지를 저장하지 못했습니다.')
-      }
-
-      const result = await response.json().catch(() => null)
-      const message = result?.error?.message || 'QR 이미지를 저장하지 못했습니다.'
-      lastError = new Error(message)
-
-      if (response.status === 401 || response.status === 403) {
-        throw lastError
-      }
-    }
+  if (response.status === 404) {
+    return null
   }
 
-  throw lastError || new Error('QR 이미지 저장 API를 찾지 못했습니다.')
+  return readApiResponse(response, '발행된 메뉴판 정보를 불러오지 못했습니다.')
 }
