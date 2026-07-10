@@ -266,6 +266,7 @@ function App() {
   const [isStepResultSubmitting, setIsStepResultSubmitting] = useState(false)
   const [menuBoardRefreshKey, setMenuBoardRefreshKey] = useState(0)
   const [publishedMenu, setPublishedMenu] = useState(null)
+  const [qrImageUrl, setQrImageUrl] = useState('')
   const [isFlowPinned, setIsFlowPinned] = useState(false)
   const [shouldResolvePostLoginRoute, setShouldResolvePostLoginRoute] = useState(false)
 
@@ -283,7 +284,7 @@ function App() {
     [menuBoardSummaries, selectedStoreId],
   )
   const storeName = useMemo(() => getUserStoreName(user), [user])
-  const qrImageUrl = useMemo(() => resolveQrImageUrl(publishedMenu), [publishedMenu])
+  const persistedQrImageUrl = useMemo(() => resolveQrImageUrl(publishedMenu), [publishedMenu])
   const menuUrl = STATIC_PUBLIC_MENU_URL
 
   function updateItem(index, updater) {
@@ -297,6 +298,15 @@ function App() {
       }
     }
   }, [uploadedImage])
+
+  useEffect(() => {
+    // Adopt the backend-confirmed QR whenever one becomes available, but never
+    // blank an already-displayed QR just because a refetch is momentarily empty
+    // (e.g. right after publishing, before the save round-trip resolves).
+    if (persistedQrImageUrl) {
+      setQrImageUrl(persistedQrImageUrl)
+    }
+  }, [persistedQrImageUrl])
 
   useEffect(() => {
     if (!selectedStoreId || !selectedMenuBoardId) {
@@ -413,6 +423,7 @@ function App() {
         setSelectedMenuBoardTitle('')
         setMenuBoardDetailError('')
         setPublishedMenu(null)
+        setQrImageUrl('')
         setIsFlowPinned(false)
         setShouldResolvePostLoginRoute(false)
         setItems([])
@@ -655,6 +666,8 @@ function App() {
     setSelectedMenuBoardTitle('')
     setMenuBoardDetailError('')
     setItems([])
+    setPublishedMenu(null)
+    setQrImageUrl('')
   }
 
   function handleImageSelect(file) {
@@ -921,16 +934,30 @@ function App() {
       const existingQrImageUrl = resolveQrImageUrl(nextPublishedMenu)
       let finalPublishedMenu = nextPublishedMenu
 
-      if (!existingQrImageUrl) {
+      if (existingQrImageUrl) {
+        setQrImageUrl(existingQrImageUrl)
+      } else {
+        // Show the freshly generated QR right away so publishing always ends
+        // with a visible QR, even if the backend save below fails or the
+        // guessed save endpoint doesn't exist. It gets replaced by the
+        // backend-confirmed copy as soon as that's available.
+        const generatedQrImageUrl = await createQrImage(nextMenuUrl)
+        setQrImageUrl(generatedQrImageUrl)
+
         try {
-          const generatedQrImageUrl = await createQrImage(nextMenuUrl)
           const savedQrResult = await savePublishedQrImage({
             menuBoardId: selectedMenuBoardId,
             menuUrl: nextMenuUrl,
             qrImageDataUrl: generatedQrImageUrl,
           })
 
-          finalPublishedMenu = normalizePublishedMenu(savedQrResult?.publicMenu || savedQrResult) || nextPublishedMenu
+          const savedPublishedMenu = normalizePublishedMenu(savedQrResult?.publicMenu || savedQrResult)
+          const savedQrImageUrl = resolveQrImageUrl(savedPublishedMenu)
+
+          if (savedQrImageUrl) {
+            finalPublishedMenu = savedPublishedMenu
+            setQrImageUrl(savedQrImageUrl)
+          }
         } catch (error) {
           setAppError(
             error instanceof Error
@@ -940,7 +967,6 @@ function App() {
         }
       }
 
-      // qrImageUrl is derived from publishedMenu so the UI always reflects the backend-saved QR image.
       setPublishedMenu(finalPublishedMenu)
       setMenuBoardRefreshKey((current) => current + 1)
       setStep(7)
@@ -1077,6 +1103,7 @@ function App() {
 
       setUser(null)
       setPublishedMenu(null)
+      setQrImageUrl('')
       setIsFlowPinned(false)
       setShouldResolvePostLoginRoute(false)
       setPhase('login')
