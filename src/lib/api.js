@@ -190,13 +190,16 @@ export async function savePublishedQrImage({ menuBoardId, qrImageDataUrl }) {
   return readApiResponse(response, 'QR 이미지를 저장하지 못했습니다.')
 }
 
-// Matches GET /menu-boards/:menuBoardId/publication (handlePublicationDetail).
-// This is the only source of a browsable QR image URL: the DB only stores a
-// storage bucket/path, and the Edge Function signs a temporary URL for it on
-// each call. A direct Supabase table read of `public_menus` can never return
-// a usable QR image URL.
-export async function fetchMenuBoardPublication(menuBoardId) {
-  const response = await apiFetch(`/menu-boards/${menuBoardId}/publication`)
+// Matches GET /stores/:storeId/publication (handleStorePublicationDetail).
+// Store-scoped, so it's always correct even if a locally cached menuBoardId
+// is stale (e.g. a store republished under a different board since the last
+// visit) — it also returns the live menuBoardId so the frontend can recover
+// from a stale cache instead of guessing. This is the only source of a
+// browsable QR image URL: the DB only stores a storage bucket/path, and the
+// Edge Function signs a temporary URL for it on each call. A direct Supabase
+// table read of `public_menus` can never return a usable QR image URL.
+export async function fetchStorePublication(storeId) {
+  const response = await apiFetch(`/stores/${storeId}/publication`)
 
   if (response.status === 404) {
     return null

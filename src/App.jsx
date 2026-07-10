@@ -21,7 +21,7 @@ import {
   apiFetch,
   createMenuBoard,
   fetchMenuBoardDetail,
-  fetchMenuBoardPublication,
+  fetchStorePublication,
   markBoardAllergenReview,
   markMenuBoardImageUploaded,
   publishMenuBoard,
@@ -507,49 +507,40 @@ function App() {
       setMenuBoardDetailError('')
 
       try {
-        const { data: publishedMenuRow, error: publishedMenuError } = await supabase
-          .from('public_menus')
-          .select('*')
-          .eq('store_id', selectedStoreId)
-          .eq('status', 'published')
-          .maybeSingle()
+        // Store-scoped, so it's authoritative regardless of whether the
+        // locally cached menuBoardId is stale (a store can only ever have one
+        // live published menu, keyed by store_id) — and it returns the live
+        // menuBoardId, so we can self-correct instead of trusting the cache.
+        let publishedMenu = null
+        let publishedMenuBoardId = ''
 
-        if (publishedMenuError) {
-          throw publishedMenuError
-        }
+        try {
+          const publication = await fetchStorePublication(selectedStoreId)
+          const publicationPublicMenu = publication?.publicMenu || publication
 
-        const publishedBoardId = publishedMenuRow?.menu_board_id || ''
+          if (!isMounted) return
 
-        if (!isMounted) return
-
-        if (publishedBoardId) {
-          // The `public_menus` table only stores a storage bucket/path for the
-          // QR image, not a browsable URL — only the API signs one on demand.
-          // A direct table read (above) can never yield a usable qrImageUrl.
-          try {
-            const publication = await fetchMenuBoardPublication(publishedBoardId)
-            const publicationPublicMenu = publication?.publicMenu || publication
-
-            if (!isMounted) return
-
-            setPublishedMenu(
-              publicationPublicMenu
-                ? normalizePublishedMenu(publicationPublicMenu)
-                : normalizePublishedMenu(publishedMenuRow),
-            )
-          } catch {
-            if (!isMounted) return
-
-            setPublishedMenu(normalizePublishedMenu(publishedMenuRow))
+          if (publicationPublicMenu) {
+            publishedMenu = normalizePublishedMenu(publicationPublicMenu)
+            publishedMenuBoardId = publishedMenu.menuBoardId || ''
           }
-        } else {
-          setPublishedMenu(null)
+        } catch {
+          if (!isMounted) return
         }
 
-        const candidateBoardIds = [
-          selectedMenuBoardId,
-          readStoredMenuBoardId(selectedStoreId),
-        ].filter(Boolean)
+        setPublishedMenu(publishedMenu)
+
+        // Right after login/session-restore, prefer showing the store's live
+        // published board (matches the dashboard-redirect intent below). Once
+        // the owner is actively working on a board — e.g. re-uploading a new
+        // menu image while the old one is still live — prefer that board
+        // instead, so an older published board doesn't hijack what's being
+        // edited.
+        const candidateBoardIds = (
+          shouldResolvePostLoginRoute
+            ? [publishedMenuBoardId, selectedMenuBoardId, readStoredMenuBoardId(selectedStoreId)]
+            : [selectedMenuBoardId, readStoredMenuBoardId(selectedStoreId), publishedMenuBoardId]
+        ).filter(Boolean)
 
         let detail = null
         let nextMenuBoardId = ''
@@ -565,36 +556,18 @@ function App() {
         }
 
         if (!detail) {
-          // Prefer the published board shown on the dashboard. If none exists, fall back to the latest draft.
-          if (publishedBoardId) {
-            nextMenuBoardId = publishedBoardId
-          } else {
-            // `owner/me` currently returns stores only, so resolve the latest board id as a fallback.
-            const { data: menuBoardRows, error: menuBoardLookupError } = await supabase
-              .from('menu_boards')
-              .select('id, title')
-              .eq('store_id', selectedStoreId)
-              .order('created_at', { ascending: false })
-              .limit(1)
+          // No cached board id resolved to a real board via the API. There is
+          // currently no endpoint to list a store's *draft* menu boards
+          // (`owner/me` only returns stores, and a direct `menu_boards` table
+          // read is silently emptied by RLS for the owner's client-side
+          // session), so we can't discover an unpublished board without one.
+          // Show the empty state instead of guessing.
+          if (!isMounted) return
 
-            if (menuBoardLookupError) {
-              throw menuBoardLookupError
-            }
-
-            const latestMenuBoard = menuBoardRows?.[0] || null
-
-            if (!latestMenuBoard) {
-              if (!isMounted) return
-
-              setSelectedMenuBoardTitle('')
-              setItems([])
-              return
-            }
-
-            nextMenuBoardId = latestMenuBoard.id
-          }
-
-          detail = await fetchMenuBoardDetail(nextMenuBoardId)
+          setSelectedMenuBoardId('')
+          setSelectedMenuBoardTitle('')
+          setItems([])
+          return
         }
 
         if (!isMounted) return
@@ -610,9 +583,10 @@ function App() {
 
         setItems(nextItems)
 
+        const isPublished = Boolean(publishedMenu) && publishedMenuBoardId === nextMenuBoardId
+
         if (
-          publishedBoardId
-          && detail.menuBoard?.id
+          isPublished
           && shouldResolvePostLoginRoute
           && !isFlowPinned
           && !uploadedImage?.file
