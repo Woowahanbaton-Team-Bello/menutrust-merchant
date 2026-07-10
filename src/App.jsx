@@ -6,6 +6,7 @@ import {
   ChevronRight,
   FileText,
   Image,
+  LayoutDashboard,
   Loader2,
   LogOut,
   Plus,
@@ -265,7 +266,6 @@ function App() {
   const [isStepResultSubmitting, setIsStepResultSubmitting] = useState(false)
   const [menuBoardRefreshKey, setMenuBoardRefreshKey] = useState(0)
   const [publishedMenu, setPublishedMenu] = useState(null)
-  const [qrImageUrl, setQrImageUrl] = useState('')
   const [isFlowPinned, setIsFlowPinned] = useState(false)
   const [shouldResolvePostLoginRoute, setShouldResolvePostLoginRoute] = useState(false)
 
@@ -283,7 +283,7 @@ function App() {
     [menuBoardSummaries, selectedStoreId],
   )
   const storeName = useMemo(() => getUserStoreName(user), [user])
-  const persistedQrImageUrl = useMemo(() => resolveQrImageUrl(publishedMenu), [publishedMenu])
+  const qrImageUrl = useMemo(() => resolveQrImageUrl(publishedMenu), [publishedMenu])
   const menuUrl = STATIC_PUBLIC_MENU_URL
 
   function updateItem(index, updater) {
@@ -297,40 +297,6 @@ function App() {
       }
     }
   }, [uploadedImage])
-
-  useEffect(() => {
-    let isMounted = true
-
-    async function syncPublishedQrImage() {
-      if (persistedQrImageUrl) {
-        setQrImageUrl((current) => (current === persistedQrImageUrl ? current : persistedQrImageUrl))
-        return
-      }
-
-      if (!menuUrl) {
-        setQrImageUrl('')
-        return
-      }
-
-      try {
-        const nextQrImageUrl = await createQrImage(menuUrl)
-
-        if (!isMounted) return
-
-        setQrImageUrl((current) => (current === nextQrImageUrl ? current : nextQrImageUrl))
-      } catch {
-        if (!isMounted) return
-
-        setQrImageUrl('')
-      }
-    }
-
-    syncPublishedQrImage()
-
-    return () => {
-      isMounted = false
-    }
-  }, [menuUrl, persistedQrImageUrl])
 
   useEffect(() => {
     if (!selectedStoreId || !selectedMenuBoardId) {
@@ -447,7 +413,6 @@ function App() {
         setSelectedMenuBoardTitle('')
         setMenuBoardDetailError('')
         setPublishedMenu(null)
-        setQrImageUrl('')
         setIsFlowPinned(false)
         setShouldResolvePostLoginRoute(false)
         setItems([])
@@ -953,14 +918,12 @@ function App() {
 
       const nextPublishedMenu = normalizePublishedMenu(result.publicMenu)
       const nextMenuUrl = STATIC_PUBLIC_MENU_URL
-
-      const generatedQrImageUrl = await createQrImage(nextMenuUrl)
       const existingQrImageUrl = resolveQrImageUrl(nextPublishedMenu)
       let finalPublishedMenu = nextPublishedMenu
-      let finalQrImageUrl = existingQrImageUrl || generatedQrImageUrl
 
       if (!existingQrImageUrl) {
         try {
+          const generatedQrImageUrl = await createQrImage(nextMenuUrl)
           const savedQrResult = await savePublishedQrImage({
             menuBoardId: selectedMenuBoardId,
             menuUrl: nextMenuUrl,
@@ -968,7 +931,6 @@ function App() {
           })
 
           finalPublishedMenu = normalizePublishedMenu(savedQrResult?.publicMenu || savedQrResult) || nextPublishedMenu
-          finalQrImageUrl = resolveQrImageUrl(finalPublishedMenu) || generatedQrImageUrl
         } catch (error) {
           setAppError(
             error instanceof Error
@@ -978,8 +940,8 @@ function App() {
         }
       }
 
+      // qrImageUrl is derived from publishedMenu so the UI always reflects the backend-saved QR image.
       setPublishedMenu(finalPublishedMenu)
-      setQrImageUrl(finalQrImageUrl)
       setMenuBoardRefreshKey((current) => current + 1)
       setStep(7)
     } catch (error) {
@@ -1089,7 +1051,12 @@ function App() {
         password: '',
         confirmPassword: '',
       }))
-      beginFlow()
+      // Defer to the post-login routing effect: it sends the owner to the
+      // dashboard when a published QR image already exists, or to the
+      // upload flow otherwise (mirrors session-restore behavior).
+      setAppError('')
+      setShouldResolvePostLoginRoute(true)
+      setPhase('flow')
     } catch (error) {
       setAuthError(getAuthErrorMessage(error))
     } finally {
@@ -1110,7 +1077,6 @@ function App() {
 
       setUser(null)
       setPublishedMenu(null)
-      setQrImageUrl('')
       setIsFlowPinned(false)
       setShouldResolvePostLoginRoute(false)
       setPhase('login')
@@ -1180,6 +1146,7 @@ function App() {
     <div className="merchant-app">
       <Sidebar
         appError={appError}
+        hasPublishedQr={Boolean(qrImageUrl)}
         isLogoutPending={isLogoutPending}
         menuBoardDetailError={menuBoardDetailError}
         menuBoardsError={menuBoardsError}
@@ -1188,6 +1155,7 @@ function App() {
         storeRegistrationError={storeRegistrationError}
         storeName={storeName}
         onLogout={logout}
+        onShowDashboard={showHomeDashboard}
         onStepChange={(nextStep) => {
           openFlowStep(nextStep, { pin: true })
         }}
@@ -1430,6 +1398,7 @@ function AuthLoadingScreen() {
 
 function Sidebar({
   appError,
+  hasPublishedQr,
   isLogoutPending,
   menuBoardDetailError,
   menuBoardsError,
@@ -1438,6 +1407,7 @@ function Sidebar({
   storeRegistrationError,
   storeName,
   onLogout,
+  onShowDashboard,
   onStepChange,
 }) {
   return (
@@ -1446,6 +1416,19 @@ function Sidebar({
         <span className="brand-box" />
         <strong>{storeName}</strong>
       </div>
+
+      {hasPublishedQr ? (
+        <nav className="dashboard-nav" aria-label="대시보드 이동">
+          <button
+            className={`dashboard-nav-item ${phase === 'home' ? 'is-active' : ''}`}
+            type="button"
+            onClick={onShowDashboard}
+          >
+            <LayoutDashboard size={15} />
+            <span>대시보드</span>
+          </button>
+        </nav>
+      ) : null}
 
       <nav className="step-nav" aria-label="메뉴판 발행 단계">
         {STEP_LABELS.map((item) => {

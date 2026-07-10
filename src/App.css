@@ -38,6 +38,38 @@
   background: var(--red);
 }
 
+.dashboard-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dashboard-nav-item {
+  display: flex;
+  width: 100%;
+  min-height: 42px;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 700;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.dashboard-nav-item.is-active {
+  background: var(--red-light);
+  color: var(--text);
+  font-weight: 800;
+}
+
 .step-nav {
   display: flex;
   flex-direction: column;
